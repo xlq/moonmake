@@ -420,6 +420,10 @@ function program(bld, dest, sources, options)
         insert(objects, obj)
     end
     -- Link the program
+    local outflag = ({
+        msvc = {"/Fe"..dest},
+        gcc = {"-o", dest},
+    })[conf.CC_type]
     return bld:target(
         dest,
         objects,
@@ -427,7 +431,7 @@ function program(bld, dest, sources, options)
             {options.CC or conf.CC or "cc"},
             gather_flags(bld, options, "CFLAGS"),
             gather_flags(bld, options, "LDFLAGS"),
-            {"-o", dest},
+            outflag,
             objects,
             gather_flags(bld, options, "LIBS")
         ))
@@ -445,13 +449,20 @@ function shared_library(bld, dest, sources, options)
         dest = dest .. (options.LIBSUFFIX or conf.LIBSUFFIX or ".so")
     end
     -- TODO: is mutating options a good idea?
-    options.CFLAGS = util.append(
-        util.copy(options.CFLAGS or conf.CFLAGS or {}),
-        "-fPIC"
-    )
-    options.LDFLAGS = util.append(
-        util.copy(options.LDFLAGS or conf.LDFLAGS or {}),
-        "-shared"
-    )
+    if conf.CC_type == "gcc" then
+        options.CFLAGS = util.append(
+            util.copy(options.CFLAGS or conf.CFLAGS or {}),
+            "-fPIC"
+        )
+        options.LDFLAGS = util.append(
+            util.copy(options.LDFLAGS or conf.LDFLAGS or {}),
+            "-shared"
+        )
+    elseif conf.CC_type == "msvc" then
+        options.LDFLAGS = util.append(
+            util.copy(options.LDFLAGS or conf.LDFLAGS or {}),
+            "/LD"
+        )
+    end
     return program(bld, dest, sources, options)
 end

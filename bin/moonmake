@@ -99,7 +99,7 @@ if util.isearch(opts, "configure") then
         local conf = conf.newconf()
         conf.opts = opts
         env.configure(conf)
-        print("Configuration finished.")
+        conf:finish()
         conf:save("config.log")
     end
 else

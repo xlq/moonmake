@@ -24,6 +24,7 @@ function newconf(parent, t)
     t = t or {}
     t.__comments = {}       -- [varname] = comment list
     t.__order = {}          -- list of variable names (the order they were created)
+    t.__usermsgs = {}       -- list of messages to print after configuration has finished
     return setmetatable(t, conf)
 end
 
@@ -183,6 +184,18 @@ function conf:endtest(result, success, diagnostics)
     if success then io.stdout:write(result, "\n")
     else io.stdout:write(result, "\n") end
     if not success and self.opts.verbose and diagnostics then print(diagnostics) end
+end
+
+-- present a message to the user.
+-- Usually, this is printed once configuration has finished.
+function conf:usermesage(...)
+    util.append(self.__usermsgs, ...)
+end
+
+-- finish configuration successfully
+function conf:finish()
+    print "Configuration finished."
+    util.count(util.map(print, self.__usermsgs))
 end
 
 -- abort configuration

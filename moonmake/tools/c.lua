@@ -32,10 +32,31 @@ local insert = table.insert
 -- Returns true on success, false/nil on failure.
 function configure(conf, cc)
     -- TODO: support more compilers!
-    cc = conf:findprogram(cc and {cc} or {"gcc", "cc", "tcc"})
+    cc = conf:findprogram(cc and {cc} or {"gcc", "cc", "tcc", "cl", "CL"})
     if not cc then return nil end
-    conf.CC = cc
     
+    -- See what it says if we run it on its own (is this a bit risky?)
+    conf:test("Checking type of compiler")
+    local exitcode, output = subprocess.call_capture {
+      cc, stderr=subprocess.STDOUT, cwd=conf:dir()}
+    if output:find("Microsoft (R)", 1, true)
+    and output:find("Compiler", 1, true) then
+        -- Microsoft Visual C compiler
+        conf.CC_type = "msvc"
+        --conf:endtest(output:match "[^%\n]+", true)
+        conf:endtest("Microsoft", true)
+    elseif util.find({"gcc", "cc", "tcc"}, cc) then
+        -- GCC-like compiler
+        conf.CC_type = "gcc"
+        conf:endtest("gcc-like", true)
+    else
+        -- Unknown sort of compiler
+        conf:endtest("unknown compiler type", false, output)
+        return false
+    end
+
+    conf.CC = cc
+
     conf:test("Checking for suffix of object files")
     local testfname, testf = conf:tmpname(nil, ".c")
     local testf_base = util.basename(testfname)
@@ -69,17 +90,28 @@ function configure(conf, cc)
     conf.OBJSUFFIX = suffix
     --conf:comment("OBJSUFFIX", "Suffix for object file names")
 
-    conf:test("Checking for -M")
-    local exitcode, msgs = subprocess.call_capture {
-        cc, "-M", testfname,
-        stderr = subprocess.STDOUT}
-    if exitcode ~= 0 then
-        os.remove(testfname)
-        conf:endtest("no", false, msgs)
-        return nil
+    -- Find a way to scan dependencies
+    local scan_method
+    if conf.CC_type == "gcc" then
+        conf:test("Checking for -M")
+        local exitcode, msgs = subprocess.call_capture {
+            cc, "-M", testfname,
+            stderr = subprocess.STDOUT}
+        if exitcode == 0 then
+            conf:endtest("yes", true)
+            scan_method = "compiler"
+        else
+            conf:endtest("no", false, msgs)
+        end
     end
-    conf:endtest("yes", true)
     os.remove(testfname)
+    -- TODO: check for and use makedepend
+    conf.CC_scan_method = scan_method or "none"
+    conf:comment("CC_scan_method", [[
+The method for scanning C sources for dependencies.
+This can be "compiler" to use the -M compiler option,
+"makedepend" to use the makedepend program, or
+"none" to do no dependency scanning and always build all sources.]])
 
     local libsuffix
     if platform.platform == "windows" then libsuffix = ".dll"
@@ -138,78 +170,62 @@ end
 
 -- C source scanner
 function scanner(bld, node)
-    local csource = node.depends[1]
-    local node_target = node.target
-    local node_target_base = util.basename(node_target)
-    -- TODO: compiler options
-  --if not c_scanner_outfname then
-  --    -- Create a temporary file for depends output
-  --    c_scanner_outfname = os.tmpname()
-  --    atexit.atexit(function()
-  --        os.remove(c_scanner_outfname)
-  --    end)
-  --end
-    local cc = node.command[1]
-    --local quote = subprocess.quote
-    
-    -- local cmdline = string.format("%s -M %s > %s",
-    --     quote(cc), quote(csource.target),
-    --     quote(c_scanner_outfname))
-    local cmdline = util.merge({cc}, node.CFLAGS, {"-M", csource.target,
-      stdout=subprocess.PIPE})
-    if not bld.opts.quiet then
-        print(make.cmdlinestr(cmdline))
-    end
-    --local retval = os.execute(cmdline)
-    --local retval = os.execute(cmdline)
-    -- if retval ~= 0 then
-    --     error(string.format(
-    --         "%s failed with return code %d while scanning `%s'",
-    --         cc, retval, csource.target))
-    -- end
-    local default_obj = util.swapext(csource.target,
-       select(2, util.splitext(node_target)))  -- object filename that compiler will use
-    local default_obj_base = util.basename(default_obj)
-    -- local f = io.open(c_scanner_outfname, "r")
-    local proc = subprocess.popen(cmdline)
-    local f = proc.stdout
-    local deps = {}
-    while true do
-        local line = f:read()
-        if not line then
-            break
+    local scan_method = node.CC_scan_method
+    if scan_method == "compiler" then
+        local csource = node.depends[1]
+        local node_target = node.target
+        local node_target_base = util.basename(node_target)
+        -- TODO: handle different formats of include path options
+        local cc = node.command[1]
+        local cmdline = util.merge({cc}, node.CFLAGS, {"-M", csource.target,
+          stdout=subprocess.PIPE})
+        if not bld.opts.quiet then
+            print(make.cmdlinestr(cmdline))
         end
-        while line:sub(-1) == "\\" do
-            -- escaped newline: merge with next line
-            local line2 = f:read() or ""
-            line = line:sub(0,-2) .. line2
+        local default_obj = util.swapext(csource.target,
+           select(2, util.splitext(node_target)))  -- object filename that compiler will use
+        local default_obj_base = util.basename(default_obj)
+        -- local f = io.open(c_scanner_outfname, "r")
+        local proc = subprocess.popen(cmdline)
+        local f = proc.stdout
+        local deps = {}
+        while true do
+            local line = f:read()
+            if not line then
+                break
+            end
+            while line:sub(-1) == "\\" do
+                -- escaped newline: merge with next line
+                local line2 = f:read() or ""
+                line = line:sub(0,-2) .. line2
+            end
+            -- throw a regular expression at it!
+            local a, b, m_targ = line:find("^([^%:]*):")
+            if not a then
+                error(string.format(
+                    "failed to parse dependency info while scanning `%s'",
+                    csource.target))
+            end
+            if m_targ ~= default_obj
+            and m_targ ~= default_obj_base then
+                error(string.format(
+                    "%s produced dependencies for `%s', how strange",
+                    cc, m_targ))
+            end
+            line = line:sub(b + 1)
+            for dep in line:gmatch("[^ ]+") do
+                deps[#deps+1] = dep
+            end
         end
-        -- throw a regular expression at it!
-        local a, b, m_targ = line:find("^([^%:]*):")
-        if not a then
+        f:close()
+        local exitcode = proc:wait()
+        if exitcode ~= 0 then
             error(string.format(
-                "failed to parse dependency info while scanning `%s'",
-                csource.target))
+                "%s failed with exit code %d while scanning `%s'",
+                cc, exitcode, csource.target))
         end
-        if m_targ ~= default_obj
-        and m_targ ~= default_obj_base then
-            error(string.format(
-                "%s produced dependencies for `%s', how strange",
-                cc, m_targ))
-        end
-        line = line:sub(b + 1)
-        for dep in line:gmatch("[^ ]+") do
-            deps[#deps+1] = dep
-        end
+        return deps
     end
-    f:close()
-    local exitcode = proc:wait()
-    if exitcode ~= 0 then
-        error(string.format(
-            "%s failed with exit code %d while scanning `%s'",
-            cc, exitcode, csource.target))
-    end
-    return deps
 end
 
 -- gather_flags(bld, conf, name, use)
@@ -242,17 +258,21 @@ function compile(bld, dest, source, options)
         dest = util.swapext(source, options.OBJSUFFIX or conf.OBJSUFFIX or ".o")
     end
     local cflags = gather_flags(bld, options, "CFLAGS")
-    local node = bld:target(
-        dest,
-        source,
-        util.merge(
-            {options.CC or conf.CC or "cc"},
-            cflags,
-            {"-c", "-o", dest, source}
-        ),
-        scanner
-    )
+    local cmd = util.merge({options.CC or conf.CC or "cc"}, cflags)
+    if conf.CC_type == "gcc" then
+        util.append(cmd, "-c", "-o", dest, source)
+    elseif conf.CC_type == "msvc" then
+        util.append(cmd, "/c", "/Fo"..dest, source)
+    end
+    local node = bld:target(dest, source, cmd, scanner)
+    -- Save information that scanner will need
+    -- TODO: either document this or allow bld:target to specify
+    -- an arbitrary object to store
     node.CFLAGS = cflags
+    node.CC_scan_method = conf.CC_scan_method
+    if node.CC_scan_method == "none" then
+        bld:always_make(node)
+    end
     return node
 end
 

@@ -32,11 +32,12 @@ local insert = table.insert
 -- Returns true on success, false/nil on failure.
 function configure(conf, cc)
     -- TODO: support more compilers!
-    cc = conf:findprogram(cc and {cc} or {"gcc", "cc", "tcc", "cl", "CL"})
+    cc = conf:findprogram(cc and {cc} or {"cl", "gcc", "cc", "tcc", "cl", "CL"})
     if not cc then return nil end
     
     -- See what it says if we run it on its own (is this a bit risky?)
     conf:test("Checking type of compiler")
+    local cc_basename = util.basename(cc)
     local exitcode, output = subprocess.call_capture {
       cc, stderr=subprocess.STDOUT, cwd=conf:dir()}
     if output:find("Microsoft (R)", 1, true)
@@ -45,7 +46,9 @@ function configure(conf, cc)
         conf.CC_type = "msvc"
         --conf:endtest(output:match "[^%\n]+", true)
         conf:endtest("Microsoft", true)
-    elseif util.search({"gcc", "cc", "tcc"}, cc) then
+    elseif util.startswith(cc_basename, "gcc")
+    or util.startswith(cc_basename, "cc")
+    or util.startswith(cc_basename, "tcc") then
         -- GCC-like compiler
         conf.CC_type = "gcc"
         conf:endtest("gcc-like", true)

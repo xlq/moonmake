@@ -106,14 +106,17 @@ else
     if not env.build then
         print("No build function in Moonfile.")
     else
-        if lfs.attributes("config.log", "mode") then
-            local conf = conf.load("config.log")
+        local myconf
+        if env.configure then
+            -- Load configuration state
+            myconf = conf.load "config.log"
         else
-            local conf = conf.newconf()
+            -- There will be no state to load
+            myconf = conf.newconf()
         end
         local bld = make.builder.new()
         bld.opts = opts
-        bld.conf = conf
+        bld.conf = myconf
         env.build(bld)
         if opts.dump then
             bld:dump()

@@ -475,6 +475,11 @@ a table of dependency filenames.
 This function can be called before or after `bld:target` and can be
 called multiple times: the dependencies are accumulated.
 
+==== bld:always_make (target)
+Always make the specified target, regardless of up-to-date-ness. This is
+useful if you are unable to do proper dependency scanning, among other
+cases.
+
 ==== bld:alias (name, targets)
 Defines an alias with name `name` that can be used as a target to build.
 For example, when using the <<moonmake,moonmake program>>, defining an

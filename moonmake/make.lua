@@ -53,6 +53,7 @@ end
 --         been visited.
 --     _updated - set to true after the node has been updated (updating a node
 --         involves running the command, unless --dry-run is being used)
+--     _always_make - set to true if the node should always be rebuilt.
 
 ---- Builder class
 builder = {}
@@ -100,14 +101,19 @@ function builder:inval_all_mtime()
     end
 end
 
--- Get or create node by filename.
-function builder:node(fname)
-    local node = self.table[fname] or {
-        target = fname,
-        depends = {},
-        _succ = {}}
-    self.table[fname] = node
-    return node
+-- Turn x into a node (x can be a node already, or a filename)
+function builder:node(x)
+    if type(x) == "table" then return x
+    elseif type(x) == "string" then
+        local node = self.table[x] or {
+            target = x,
+            depends = {},
+            _succ = {}}
+        self.table[x] = node
+        return node
+    else
+        util.errorf("Unexpected argument for builder:node: %s", type(x))
+    end
 end
 
 function validate_command(cmd)
@@ -146,6 +152,13 @@ end
 -- Add extra dependencies for a target
 function builder:depends(tgt, dep_names)
     return self:target{tgt, dep_names}
+end
+
+-- Always build a node
+function builder:always_make(node)
+    node = self:node(node)
+    node._always_make = true
+    return node
 end
 
 -- Declare an alias node
@@ -197,7 +210,7 @@ function builder:do_dyn_deps(node, need_update)
     if need_update or not dyn_deps then
         self:debug("Running scanner (needupdate=%s)", tostring(need_update))
         scanner_run = true
-        dyn_deps = self:run_scanner(node)
+        dyn_deps = self:run_scanner(node) or {}
     end
     if not need_update then
         -- Check dynamic dependencies
@@ -244,7 +257,7 @@ function builder:examine(node)
     local node_command = node.command
     if node_command then
         local node_mtime = self:get_mtime(node)
-        local need_update = self.opts.always_make
+        local need_update = self.opts.always_make or node._always_make
 
         if not node_mtime then
             -- target does not exist

@@ -50,7 +50,7 @@ end
 -- Returns true on success, false/nil on failure.
 function configure(conf, cc)
     -- TODO: support more compilers!
-    cc = conf:findprogram(cc and {cc} or {"cl", "gcc", "cc", "tcc", "cl", "CL"})
+    cc = conf:findprogram(cc and {cc} or {"cl", "CL", "gcc", "cc", "tcc"})
     if not cc then return false end
     
     -- Find out what sort of compiler it is, by its name
@@ -118,6 +118,13 @@ function configure(conf, cc)
         return false
     end
     --------------------
+    if cc_type == "msvc" then
+        -- TODO: override from environment
+        local link = conf:findprogram({"link", "LINK"}, "Checking for linker")
+        if not link then return false end
+        conf.LINK = link
+    end
+    --------------------
     conf.CC = cc
     conf.CC_type = cc_type
     conf.OBJSUFFIX = suffix
@@ -163,6 +170,15 @@ This can be "compiler" to use the -M compiler option,
 "none" to do no dependency scanning and always build all sources.]])
 
     --------------------
+    if cc_type == "msvc" then
+        -- Parse LIB environment variable and add to LIBPATH
+        local libpath = conf.LIBPATH or {}
+        conf.LIBPATH = libpath
+        conf.LIBPATH = util.merge(conf.LIBPATH or {},
+            util.split(os.getenv "LIB" or "", ";"))
+    end
+
+    --------------------
     -- Get library suffix based on platform
     local libsuffix
     if platform.platform == "windows" then libsuffix = ".dll"
@@ -200,7 +216,7 @@ function make_cmdline(options, conf, output, inputs, link)
     if cc_type == "msvc" and link then cmd = {options.LINK or conf.LINK or "LINK.EXE"} -- use separate linker program
     else
         cmd = {options.CC or conf.CC or "cc"}
-        if not link then util.append(cmd, "-c") end
+        if not link then util.append(cmd, ({msvc="/c"})[cc_type] or "-c") end
     end
     if cc_type == "msvc" then util.append(cmd, "/nologo") end -- don't show useless logo
     if output then
@@ -218,7 +234,18 @@ function make_cmdline(options, conf, output, inputs, link)
     if not link then
         -- C preprocessor search path options
         local incopt = ({msvc="/I"})[cc_type] or "-I"
-        util.merge(cmd, util.map(function(x) return incopt..x end, gather_options("CPPPATH", options, conf)))
+        local defopt = ({msvc="/D"})[cc_type] or "-D"
+        util.merge(cmd,
+            util.map(
+                function(x) return incopt..x end,
+                gather_options("CPPPATH", options, conf)),
+            util.mapm(
+                function(k,v)
+                    if v == true then return defopt..k
+                    else return defopt..k.."="..tostring(v) end
+                end,
+                util.pairs(gather_options("CPPDEFINES", options, conf)))
+        )
     else -- link
         -- linker options
         util.merge(cmd, gather_options("LDFLAGS", options, conf))
@@ -230,27 +257,29 @@ function make_cmdline(options, conf, output, inputs, link)
     -- Add sources
     util.merge(cmd, inputs)
     -- Add libraries
-    local libs = gather_options("LIBS", options, conf)
-    if cc_type == "gcc" then util.merge(cmd, libs)
-    else
-        local libpath = gather_options("LIBPATH", options, conf)
-        for _, lib in ipairs(gather_options("LIBS", options, conf)) do
-            if util.startswith(lib, "-l") then
-                -- Well LINK.EXE doesn't understand the concept of searching for libraries.
-                -- We'll have to do our own searching.
-                local libfile, tried = findlib(libpath, lib:sub(3))
-                if not libfile then
-                    -- Couldn't find it. This is bad.
-                    if util.isempty(tried) then
-                        return util.errorf("%s not found (no library paths to search!)", lib)
-                    else
-                        return util.errorf("%s not found. Tried:\n\t%s", lib,
-                            table.concat(tried, "\n\t"))
+    if link then
+        local libs = gather_options("LIBS", options, conf)
+        if cc_type == "gcc" then util.merge(cmd, libs)
+        else
+            local libpath = gather_options("LIBPATH", options, conf)
+            for _, lib in ipairs(gather_options("LIBS", options, conf)) do
+                if util.startswith(lib, "-l") then
+                    -- Well LINK.EXE doesn't understand the concept of searching for libraries.
+                    -- We'll have to do our own searching.
+                    local libfile, tried = findlib(libpath, lib:sub(3))
+                    if not libfile then
+                        -- Couldn't find it. This is bad.
+                        if util.isempty(tried) then
+                            return util.errorf("%s not found (no library paths to search!)", lib)
+                        else
+                            return util.errorf("%s not found. Tried:\n\t%s", lib,
+                                table.concat(tried, "\n\t"))
+                        end
                     end
+                    util.append(cmd, libfile)
+                else
+                    util.append(cmd, lib)
                 end
-                util.append(cmd, libfile)
-            else
-                util.append(cmd, lib)
             end
         end
     end
@@ -273,26 +302,41 @@ function try_compile(kwargs)
     assert(type(conf) == "table" and conf.test, "expected configure object as first argument")
     conf:test(kwargs.desc)
     local content = kwargs.content or "int main(){ return 0; }"
-    local testfname, testf = conf:tmpname(nil, ".c")
-    testf:write(content, "\n")
-    testf:close()
-    --conf:log("Wrote `%s':\n%s", testfname, content)
-    local cmd = make_cmdline(conf, kwargs, nil, util.basename(testfname), kwargs.link)
-    cmd.cwd = util.dirname(testfname)
+    
+    local sourcename, sourcef = conf:tmpname(nil, ".c")
+    sourcef:write(content, "\n")
+    sourcef:close()
+    local objname = util.swapext(sourcename, kwargs.OBJSUFFIX or conf.OBJSUFFIX or ".o")
+    local cmd = make_cmdline(conf, kwargs, objname, sourcename, false)
     cmd.stderr = subprocess.STDOUT
     local exitcode, msgs = subprocess.call_capture(cmd)
-    os.remove(testfname)
+    os.remove(sourcename)
     if exitcode ~= 0 then
+        os.remove(objname)
         conf:endtest(kwargs.failstr or "no", false, msgs)
         return false
-    else
-        conf:endtest(kwargs.okstr or "ok", true, msgs)
-        return true
     end
+    
+    if kwargs.link then
+        local cmd = make_cmdline(conf, kwargs, nil, util.basename(objname), true)
+        cmd.cwd = util.dirname(objname)
+        cmd.stderr = subprocess.STDOUT
+        exitcode, msgs = subprocess.call_capture(cmd)
+        os.remove(objname)
+        if exitcode ~= 0 then
+            conf:endtest(kwargs.failstr or "no", false, msgs)
+            return false
+        end
+    else
+        os.remove(objname)
+    end
+    
+    conf:endtest(kwargs.okstr or "ok", true, msgs)
+    return true
 end
 
 -- Collect flags needed for using makedepend
-function get_m_flags(options, conf)
+local function get_m_flags(options, conf)
     local flags = util.totable(
         util.map(function(x) return "-I"..x end,
             gather_options("CPPPATH", options, conf)))

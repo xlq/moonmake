@@ -117,6 +117,14 @@ function map(f, iterable)
     end
 end
 
+function mapm(f, iterable)
+    iterable = iter(iterable)
+    return function()
+        local x = {iterable()}
+        if next(x) then return f(unpack(x)) end
+    end
+end
+
 -- Iterate over an iterable, skipping elements for which the
 -- predicate f evaluates to false.
 function filter(f, iterable)

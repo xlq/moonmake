@@ -26,6 +26,24 @@ local insert = table.insert
 --     end
 -- end
 
+-- gather_options(name, ...)
+-- Assemble table of options from a configuration.
+-- ... contains options tables to look for options in.
+-- This function handles the 'use' list.
+-- name is "CFLAGS", "LDFLAGS" etc.
+local function gather_options(name, options, conf)
+    local flags = util.copy(options[name] or conf[name] or {})
+    local use = options.use or conf.use or {}
+    -- Process "use" setting (list of package names to get options from)
+    for _, pkgname in ipairs(use) do
+        local pkg = options[pkgname] or conf[pkgname]
+        if pkg then
+            util.merge(flags, pkg[name])
+        end
+    end
+    return flags
+end
+
 -- configure(conf, [cc])
 -- Configure the C compiler.
 -- cc is the path of the C compiler to use.
@@ -33,34 +51,32 @@ local insert = table.insert
 function configure(conf, cc)
     -- TODO: support more compilers!
     cc = conf:findprogram(cc and {cc} or {"cl", "gcc", "cc", "tcc", "cl", "CL"})
-    if not cc then return nil end
+    if not cc then return false end
     
-    -- See what it says if we run it on its own (is this a bit risky?)
+    -- Find out what sort of compiler it is, by its name
     conf:test("Checking type of compiler")
-    local cc_basename = util.basename(cc)
-    local exitcode, output = subprocess.call_capture {
-      cc, stderr=subprocess.STDOUT, cwd=conf:dir()}
-    if output:find("Microsoft (R)", 1, true)
-    and output:find("Compiler", 1, true) then
-        -- Microsoft Visual C compiler
-        conf.CC_type = "msvc"
-        conf.CC_compile_only = "/c"
-        --conf:endtest(output:match "[^%\n]+", true)
-        conf:endtest("Microsoft", true)
-    elseif util.startswith(cc_basename, "gcc")
-    or util.startswith(cc_basename, "cc")
-    or util.startswith(cc_basename, "tcc") then
-        -- GCC-like compiler
-        conf.CC_type = "gcc"
-        conf.CC_compile_only = "-c"
-        conf:endtest("gcc-like", true)
-    else
-        -- Unknown sort of compiler
-        conf:endtest("unknown compiler type", false, output)
+    local patterns = {
+        {type="gcc", "[gt]?cc.*"},
+        {type="msvc", "[Cc][Ll].*"},
+    }
+    local cc_type
+    for _, x in ipairs(patterns) do
+        for _, ptn in ipairs(x) do
+            if cc:match(ptn) then
+                cc_type = x.type
+                break
+            end
+        end
+        if cc_type then break end
+    end    
+    if not cc_type then
+        -- Didn't match any patterns
+        -- TODO: allow user to specify compiler type to handle unusual names
+        conf:endtest("unknown compiler type", false)
         return false
     end
-
-
+    conf:endtest(cc_type, true)
+    --------------------
     conf:test("Checking for suffix of object files")
     local testdir = util.path(conf:dir(), "objsuffixtest")
     assert(lfs.mkdir(testdir))
@@ -73,7 +89,7 @@ function configure(conf, cc)
     f:write("int main(){ return 0; }\n")
     f:close()
     local exitcode, msgs = subprocess.call_capture {
-        cc, conf.CC_compile_only, "test.c",
+        cc, ({msvc="/c"})[cc_type] or "-c", "test.c",
         stderr = subprocess.STDOUT,
         cwd = testdir
     }
@@ -101,50 +117,21 @@ function configure(conf, cc)
         conf:endtest("failed", false, "No object found.")
         return false
     end
-
-    --[[
-    local testfname, testf = conf:tmpname(nil, ".c")
-    local testf_base = util.basename(testfname)
-    local testf_dir = util.dirname(testfname)
-    testf:write("int main(){ return 0; }\n")
-    testf:close()
-    local exitcode, msgs = subprocess.call_capture {
-        cc, "-c", testf_base,
-        stderr = subprocess.STDOUT,
-        cwd = testf_dir}
-    if exitcode ~= 0 then
-        os.remove(testfname)
-        conf:endtest("failed", false, msgs)
-        return nil
-    end
-    local testf_root = util.splitext(testf_base) -- filename without suffix
-    local suffix = nil
-    for f in lfs.dir(testf_dir) do
-        local f_root, f_ext = util.splitext(f)
-        if f ~= testf_base and f_root == testf_root then
-            suffix = f_ext
-            conf:endtest(suffix, true)
-            break
-        end
-    end
-    if not suffix then
-        os.remove(testfname)
-        conf:endtest("failed", false, "no object found")
-        return nil
-    end
-    ]]--
-    
+    --------------------
     conf.CC = cc
+    conf.CC_type = cc_type
     conf.OBJSUFFIX = suffix
     --conf:comment("OBJSUFFIX", "Suffix for object file names")
-
+    
+    --------------------
     -- Find a way to scan dependencies
-    local testfname, testf = conf:tmpname(nil, ".c")
-    testf:write("int main(){ return 0; }\n")
-    testf:close()
     local scan_method
-    if conf.CC_type == "gcc" then
+    if cc_type == "gcc" then
+        -- Try using GCC's -M option
         conf:test("Checking for -M")
+        local testfname, testf = conf:tmpname(nil, ".c")
+        testf:write("int main(){ return 0; }\n")
+        testf:close()
         local exitcode, msgs = subprocess.call_capture {
             cc, "-M", testfname,
             stderr = subprocess.STDOUT}
@@ -154,8 +141,8 @@ function configure(conf, cc)
         else
             conf:endtest("no", false, msgs)
         end
+        os.remove(testfname)
     end
-    os.remove(testfname)
     if not scan_method then
         -- Try to find makedepend
         local makedepend = conf.MAKEDEPEND or conf:findprogram {"makedepend"}
@@ -175,6 +162,8 @@ This can be "compiler" to use the -M compiler option,
 "makedepend" to use the makedepend program, or
 "none" to do no dependency scanning and always build all sources.]])
 
+    --------------------
+    -- Get library suffix based on platform
     local libsuffix
     if platform.platform == "windows" then libsuffix = ".dll"
     else libsuffix = ".so" end
@@ -184,6 +173,90 @@ This can be "compiler" to use the -M compiler option,
 
     return true
 end
+
+-- Search for a library
+-- Return its path, or nil, tried
+--    where tried is a table of the paths that were tried.
+local function findlib(libpath, libname)
+    local tried = {}
+    for _, p in ipairs(libpath) do
+        -- NOTE: findlib only used for MSVC so we can assume .lib suffix
+        local try_path = util.path(p, libname..".lib")
+        if lfs.attributes(try_path, "mode") then
+            return try_path
+        else
+            tried[#tried+1] = try_path
+        end
+    end
+    return nil, tried
+end
+            
+
+-- make_cmdline(options, conf, output, inputs, link)
+-- Return a command line table.
+--   link - true if linker is to be run, false for compiler
+function make_cmdline(options, conf, output, inputs, link)
+    local cc_type = options.CC_type or conf.CC_type
+    local cmd
+    if cc_type == "msvc" and link then cmd = {options.LINK or conf.LINK or "LINK.EXE"} -- use separate linker program
+    else
+        cmd = {options.CC or conf.CC or "cc"}
+        if not link then util.append(cmd, "-c") end
+    end
+    if cc_type == "msvc" then util.append(cmd, "/nologo") end -- don't show useless logo
+    if output then
+        if cc_type == "gcc" then util.append(cmd, "-o", output)
+        else
+            if link then util.append(cmd, "/OUT:"..output)
+            else util.append(cmd, "/Fo"..output) end
+        end
+    end
+    if not link or cc_type == "gcc" then
+        -- CFLAGS should be given to gcc even during linking, according to
+        -- the GNU make manual.
+        util.merge(cmd, gather_options("CFLAGS", options, conf))
+    end
+    if not link then
+        -- C preprocessor search path options
+        local incopt = ({msvc="/I"})[cc_type] or "-I"
+        util.merge(cmd, util.map(function(x) return incopt..x end, gather_options("CPPPATH", options, conf)))
+    else -- link
+        -- linker options
+        util.merge(cmd, gather_options("LDFLAGS", options, conf))
+        if cc_type == "gcc" then
+            util.merge(cmd, util.map(function(x) return "-L"..x end,
+                gather_options("LIBPATH", options, conf)))
+        end
+    end
+    -- Add sources
+    util.merge(cmd, inputs)
+    -- Add libraries
+    local libs = gather_options("LIBS", options, conf)
+    if cc_type == "gcc" then util.merge(cmd, libs)
+    else
+        local libpath = gather_options("LIBPATH", options, conf)
+        for _, lib in ipairs(gather_options("LIBS", options, conf)) do
+            if util.startswith(lib, "-l") then
+                -- Well LINK.EXE doesn't understand the concept of searching for libraries.
+                -- We'll have to do our own searching.
+                local libfile, tried = findlib(libpath, lib:sub(3))
+                if not libfile then
+                    -- Couldn't find it. This is bad.
+                    if util.isempty(tried) then
+                        return util.errorf("%s not found (no library paths to search!)", lib)
+                    else
+                        return util.errorf("%s not found. Tried:\n\t%s", lib,
+                            table.concat(tried, "\n\t"))
+                    end
+                end
+                util.append(cmd, libfile)
+            else
+                util.append(cmd, lib)
+            end
+        end
+    end
+    return cmd
+end 
 
 -- try_compile {conf, [options...]}
 -- Try a compilation.
@@ -195,7 +268,6 @@ end
 --   okstr = result string on success (default "ok")
 --   failstr = result string on failure (default "no")
 -- Return value: true if compilation succeeded, false/nil if not.
-
 function try_compile(kwargs)
     assert(type(kwargs) == "table", "expected a single table argument")
     local conf = kwargs[1]
@@ -206,19 +278,9 @@ function try_compile(kwargs)
     testf:write(content, "\n")
     testf:close()
     --conf:log("Wrote `%s':\n%s", testfname, content)
-    local cc = kwargs.CC or conf.CC or "cc"
-    local cflags = kwargs.CFLAGS or conf.CFLAGS or {}
-    local ldflags = kwargs.LDFLAGS or conf.LDFLAGS or {}
-    local libs = kwargs.LIBS or conf.LIBS or {}
-    local cmd
-    if kwargs.link then
-        cmd = util.merge({cc}, cflags, ldflags, {util.basename(testfname)}, libs)
-    else
-        cmd = util.merge({cc, "-c"}, cflags, {util.basename(testfname)})
-    end
-    -- local cmd = subprocess.form_cmdline(cmd) -- ???
-    --conf:log("Running: %s", cmd)
-    util.merge(cmd, {cwd=util.dirname(testfname), stderr=subprocess.STDOUT})
+    local cmd = make_cmdline(conf, kwargs, nil, util.basename(testfname), kwargs.link)
+    cmd.cwd = util.dirname(testfname)
+    cmd.stderr = subprocess.STDOUT
     local exitcode, msgs = subprocess.call_capture(cmd)
     os.remove(testfname)
     if exitcode ~= 0 then
@@ -230,35 +292,37 @@ function try_compile(kwargs)
     end
 end
 
--- gather_flags(bld, conf, name, use)
--- Assemble flags
--- name is "CFLAGS", "LDFLAGS" etc.
-local function gather_flags(bld, options, name)
-    local conf = options.conf or bld.conf
-    local flags = util.copy(options[name] or conf[name] or {})
-    for _, pkgname in ipairs(options.use or {}) do
-        local pkg = options[pkgname] or conf[pkgname]
-        if pkg then
-            util.merge(flags, pkg[name])
+-- Collect flags needed for using makedepend
+function get_m_flags(options, conf)
+    local flags = util.totable(
+        util.map(function(x) return "-I"..x end,
+            gather_options("CPPPATH", options, conf)))
+    for k, v in pairs(gather_options("CPPDEFINES", options, conf)) do
+        if v == true then util.append(flags, "-D"..k)
+        else util.append(flags, "-D"..k.."="..tostring(v)) end
+    end
+    return flags
+end
+
+-- Collect include path flags from a table.
+-- Returns table of "-I<foo>" strings.
+-- NOTE: not all include flags will come from CPPPATH,
+-- eg. some include flags might come from CFLAGS from pkgconfig.
+-- So this function finds all the include path flags.
+function get_incflags(cmd)
+    local flags = {}
+    for _, x in ipairs(cmd) do
+        if util.startswith(x, "-I")
+        or util.startswith(x, "/I") then
+            util.append(flags, "-I"..x:sub(3))
         end
     end
     return flags
 end
 
--- Collect include flags and return list of include directories
-local function get_incpaths(flags)
-    local dirs = {}
-    for _, x in ipairs(flags) do
-        if util.startswith(x, "-I") or util.startswith(x, "/I") then
-            insert(dirs, x:sub(3))
-        end
-    end
-    return dirs
-end
-
 -- Collect include paths for MSVC
--- These arestored in an environment variable called INCLUDE.
-function get_msvc_stdincludes()
+-- These are stored in an environment variable called INCLUDE.
+local function get_msvc_stdincludes()
     local envstr = os.getenv "INCLUDE"
     if envstr then return util.split(envstr, ";")
     else return {} end
@@ -273,19 +337,28 @@ function scanner(bld, node)
         local csource = node.depends[1]
         local node_target = node.target
         local node_target_base = util.basename(node_target)
-
+        -- Decide which command to use to scan for dependencies
         local cmdline
         if scan_method == "compiler" then
             local cc = node.command[1]
-            cmdline = util.merge({cc}, node.CFLAGS, {"-M", csource.target,
-              stdout=subprocess.PIPE})
+            cmdline = util.merge(
+                {cc},
+                gather_options("CFLAGS", options, conf),
+                util.map(function(x) return "-I"..x end,
+                    gather_options("CPPPATH", options, conf)),
+                 {"-M", csource.target,
+                    stdout=subprocess.PIPE})
         else
-            local function addI(x) return "-I"..x end
-            local flags = util.totable(util.map(addI, get_incpaths(node.CFLAGS)))
+            local flags = get_m_flags(options, conf)
             if conf.CC_type == "msvc" then
                 -- We need a few more things for makedepend
-                util.merge(flags, util.map(addI, get_msvc_stdincludes()))
-                util.append(flags, "-D_WIN32")
+                util.merge(flags, util.map(function(x) return "-I"..x end,
+                    get_msvc_stdincludes()))
+                -- Define some things to satisfy the Windows headers.
+                -- These macros are usually defined by CL.EXE.
+                -- It doesn't matter if these flags are wrong, because we only
+                -- need to check header dependencies.
+                util.append(flags, "-D_WIN32", "-D_M_IX86")
             end
             -- Use -w0 to make sure each dependency gets its own line.
             -- This way, we can actually handle spaces in file names.
@@ -298,16 +371,20 @@ function scanner(bld, node)
             )
         end
 
-        if not bld.opts.quiet then
-            print(make.cmdlinestr(cmdline))
-        end
         local default_obj = util.swapext(csource.target,
            select(2, util.splitext(node_target)))  -- object filename that compiler will use
         local default_obj_base = util.basename(default_obj)
         -- local f = io.open(c_scanner_outfname, "r")
+        
+        -- Start the scanner
+        if not bld.opts.quiet then
+            print(make.cmdlinestr(cmdline))
+        end
         local proc = subprocess.popen(cmdline)
         local f = proc.stdout
         local deps = {}
+        
+        -- Parse the Makefile rules it outputs
         while true do
             local line = f:read()
             if not line then
@@ -351,9 +428,7 @@ function scanner(bld, node)
                 "%s failed with exit code %d while scanning `%s'",
                 cc, exitcode, csource.target))
         end
-        return deps
-    elseif scan_method == "makedepend" then
-        
+        return deps    
     end
 end
 
@@ -371,18 +446,11 @@ function compile(bld, dest, source, options)
     if not dest then
         dest = util.swapext(source, options.OBJSUFFIX or conf.OBJSUFFIX or ".o")
     end
-    local cflags = gather_flags(bld, options, "CFLAGS")
-    local cmd = util.merge({options.CC or conf.CC or "cc"}, cflags)
-    if conf.CC_type == "gcc" then
-        util.append(cmd, "-c", "-o", dest, source)
-    elseif conf.CC_type == "msvc" then
-        util.append(cmd, "/c", "/Fo"..dest, source)
-    end
+    local cmd = make_cmdline(conf, options, dest, source, false)
     local node = bld:target(dest, source, cmd, scanner)
     -- Save information that scanner will need
     -- TODO: either document this or allow bld:target to specify
     -- an arbitrary object to store
-    node.CFLAGS = cflags
     node.cc_options = options
     node.cc_conf = conf
     if conf.CC_scan_method == "none" then
@@ -409,47 +477,35 @@ function program(bld, dest, sources, options)
         local base, ext = util.splitext(src)
         local obj
         -- TODO: more suffixes!
-        if util.search({".c", ".i"}, ext) then
+        if util.search({".o", ".obj", ".ld"}, ext:lower()) then
+            -- Already an object
+            obj = src
+        else
             -- Compile this source
             obj = base .. (options.OBJSUFFIX or conf.OBJSUFFIX or ".o")
             compile(bld, obj, src, options)
-        else
-            -- This is already an object
-            obj = src
         end
         insert(objects, obj)
     end
     -- Link the program
-    local outflag = ({
-        msvc = {"/Fe"..dest},
-        gcc = {"-o", dest},
-    })[conf.CC_type]
-    return bld:target(
-        dest,
-        objects,
-        (util.merge(
-            {options.CC or conf.CC or "cc"},
-            gather_flags(bld, options, "CFLAGS"),
-            gather_flags(bld, options, "LDFLAGS"),
-            outflag,
-            objects,
-            gather_flags(bld, options, "LIBS")
-        ))
-    )
+    local cmd = make_cmdline(options, conf, dest, objects, true)
+    return bld:target(dest, objects, cmd)
 end
 
 -- shared_library(bld, dest, sources, [options])
 -- Link a C shared library
 -- TODO: deal with "lib" prefix conventions
+-- TODO: deal with Windows export definitions
 function shared_library(bld, dest, sources, options)
     options = options or {}
     local conf = options.conf or bld.conf
-    if not select(2, util.splitext(dest)) then
+    if not select(2, util.splitext(dest)) then -- dest has no suffix
         -- Append library suffix
         dest = dest .. (options.LIBSUFFIX or conf.LIBSUFFIX or ".so")
     end
     -- TODO: is mutating options a good idea?
     if conf.CC_type == "gcc" then
+        -- XXX: don't use -fPIC if not needed (eg. MinGW)
         options.CFLAGS = util.append(
             util.copy(options.CFLAGS or conf.CFLAGS or {}),
             "-fPIC"
@@ -461,7 +517,7 @@ function shared_library(bld, dest, sources, options)
     elseif conf.CC_type == "msvc" then
         options.LDFLAGS = util.append(
             util.copy(options.LDFLAGS or conf.LDFLAGS or {}),
-            "/LD"
+            "/DLL"
         )
     end
     return program(bld, dest, sources, options)

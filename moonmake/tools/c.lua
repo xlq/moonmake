@@ -44,6 +44,7 @@ function configure(conf, cc)
     and output:find("Compiler", 1, true) then
         -- Microsoft Visual C compiler
         conf.CC_type = "msvc"
+        conf.CC_compile_only = "/c"
         --conf:endtest(output:match "[^%\n]+", true)
         conf:endtest("Microsoft", true)
     elseif util.startswith(cc_basename, "gcc")
@@ -51,6 +52,7 @@ function configure(conf, cc)
     or util.startswith(cc_basename, "tcc") then
         -- GCC-like compiler
         conf.CC_type = "gcc"
+        conf.CC_compile_only = "-c"
         conf:endtest("gcc-like", true)
     else
         -- Unknown sort of compiler
@@ -58,9 +60,49 @@ function configure(conf, cc)
         return false
     end
 
-    conf.CC = cc
 
     conf:test("Checking for suffix of object files")
+    local testdir = util.path(conf:dir(), "objsuffixtest")
+    assert(lfs.mkdir(testdir))
+    local f, err = io.open(util.path(testdir, "test.c"), "w")
+    if not f then
+        print(lfs.rmdir(testdir))
+        conf:endtest("failed", false, "Cannot create "..testdir..": "..err)
+        return false
+    end
+    f:write("int main(){ return 0; }\n")
+    f:close()
+    local exitcode, msgs = subprocess.call_capture {
+        cc, conf.CC_compile_only, "test.c",
+        stderr = subprocess.STDOUT,
+        cwd = testdir
+    }
+    if exitcode ~= 0 then
+        os.remove(util.path(testdir, "test.c"))
+        lfs.rmdir(testdir)
+        conf:endtest("failed", false, msgs)
+        return false
+    end
+    local suffix = nil
+    local diriter, dirobj = lfs.dir(testdir)
+    for f in diriter, dirobj do
+        local f_root, f_ext = util.splitext(f)
+        if f ~= "test.c" and f_root == "test" then
+            suffix = f_ext
+            os.remove(util.path(testdir, f))
+            conf:endtest(suffix, true)
+            break
+        end
+    end
+    dirobj:close()  -- closing this allows us to delete the directory
+    os.remove(util.path(testdir, "test.c"))
+    lfs.rmdir(testdir)
+    if not suffix then
+        conf:endtest("failed", false, "No object found.")
+        return false
+    end
+
+    --[[
     local testfname, testf = conf:tmpname(nil, ".c")
     local testf_base = util.basename(testfname)
     local testf_dir = util.dirname(testfname)
@@ -90,10 +132,16 @@ function configure(conf, cc)
         conf:endtest("failed", false, "no object found")
         return nil
     end
+    ]]--
+    
+    conf.CC = cc
     conf.OBJSUFFIX = suffix
     --conf:comment("OBJSUFFIX", "Suffix for object file names")
 
     -- Find a way to scan dependencies
+    local testfname, testf = conf:tmpname(nil, ".c")
+    testf:write("int main(){ return 0; }\n")
+    testf:close()
     local scan_method
     if conf.CC_type == "gcc" then
         conf:test("Checking for -M")
@@ -208,10 +256,19 @@ local function get_incpaths(flags)
     return dirs
 end
 
+-- Collect include paths for MSVC
+-- These arestored in an environment variable called INCLUDE.
+function get_msvc_stdincludes()
+    local envstr = os.getenv "INCLUDE"
+    if envstr then return util.split(envstr, ";")
+    else return {} end
+end
+
 -- C source scanner
 function scanner(bld, node)
     local conf, options = node.cc_conf, node.cc_options
     local scan_method = conf.CC_scan_method
+    local newline_delim = false
     if scan_method == "compiler" or scan_method == "makedepend" then
         local csource = node.depends[1]
         local node_target = node.target
@@ -223,13 +280,21 @@ function scanner(bld, node)
             cmdline = util.merge({cc}, node.CFLAGS, {"-M", csource.target,
               stdout=subprocess.PIPE})
         else
+            local function addI(x) return "-I"..x end
+            local flags = util.totable(util.map(addI, get_incpaths(node.CFLAGS)))
+            if conf.CC_type == "msvc" then
+                -- We need a few more things for makedepend
+                util.merge(flags, util.map(addI, get_msvc_stdincludes()))
+                util.append(flags, "-D_WIN32")
+            end
+            -- Use -w0 to make sure each dependency gets its own line.
+            -- This way, we can actually handle spaces in file names.
+            -- TODO: use something that isn't as rubbish as makedepend!
+            newline_delim = true
             cmdline = util.merge(
-                {options.MAKEDEPEND or conf.MAKEDEPEND or "makedepend", "-f-",
+                {options.MAKEDEPEND or conf.MAKEDEPEND or "makedepend", "-w0", "-f-",
                     "-o"..(options.OBJSUFFIX or conf.OBJSUFFIX or ".o")},
-                util.map(function(x) return "-I"..x end,
-                    get_incpaths(node.CFLAGS)),
-                {csource.target,
-                    stdout=subprocess.PIPE}
+                flags, {csource.target, stdout=subprocess.PIPE}
             )
         end
 
@@ -270,8 +335,12 @@ function scanner(bld, node)
                         cc, m_targ))
                 end
                 line = line:sub(b + 1)
-                for dep in line:gmatch("[^ ]+") do
-                    deps[#deps+1] = dep
+                if newline_delim then
+                    deps[#deps+1] = line:match("[^%s].*")
+                else
+                    for dep in line:gmatch("[^ ]+") do
+                        deps[#deps+1] = dep
+                    end
                 end
             end
         end

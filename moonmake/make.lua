@@ -529,9 +529,9 @@ function builder:dump()
         if node.scanner then
             local dbg = debug.getinfo(node.scanner, "nS")
             if dbg.name then
-                return ", scanner=["..dbg.namewhat.." \""..dbg.name.."\"]"
+                return ", ["..dbg.namewhat.." \""..dbg.name.."\"]"
             else
-                return ", scanner=["..dbg.short_src..":"..dbg.linedefined.."]"
+                return ", ["..dbg.short_src..":"..dbg.linedefined.."]"
             end
         else
             return ""
@@ -539,7 +539,7 @@ function builder:dump()
     end
     print("Dump of dependency table:")
     for node_name, node in pairs(self.table) do
-        print("target {\"" .. node_name .. "\", {"
+        print("bld:target(\"" .. tostring(node_name) .. "\", {"
           .. util.concat(
             util.map(
               function(d) return "\""..tostring(d.target).."\"" end,
@@ -550,13 +550,13 @@ function builder:dump()
                 util.map(
                   function(c) return "\""..tostring(c).."\"" end,
                   node.command), ", ") .. "}")
-            or "")
+            or ", nil")
           .. scannerinfo(node)
-          .. "}")
+          .. ")")
     end
     print("Aliases:")
     for name, nodes in pairs(self.aliases) do
-        print("alias(\"" .. name .. "\", {"
+        print("bld:alias(\"" .. name .. "\", {"
           .. util.concat(map(function(node) return "\""..node.target.."\"" end, nodes), ", ")
           .. "})")
     end

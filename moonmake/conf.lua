@@ -203,7 +203,7 @@ end
 -- conf:findprogram({cmd1, cmd2, ...}, [desc])
 -- Find a program named cmd1 or cmd2 or ...
 -- Desc is a description of the test (optional).
--- Return its filename.
+-- Return filename, fullpath
 function conf:findprogram(cmds, desc)
     self:test(desc or "Checking for " .. table.concat(cmds, ","))
     local path = split_path()
@@ -213,7 +213,7 @@ function conf:findprogram(cmds, desc)
             if util.isabs(prog2) then
                 if lfs.attributes(prog2, "mode") then
                     self:endtest(prog2, true)
-                    return prog2
+                    return prog2, prog2
                 end
             else
                 for _, dir in ipairs(path) do
@@ -221,7 +221,7 @@ function conf:findprogram(cmds, desc)
                     if lfs.attributes(try_path, "mode") then
                         self:endtest(try_path, true)
                         --return try_path
-                        return prog2
+                        return prog2, try_path
                     end
                 end
             end

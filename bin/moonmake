@@ -51,6 +51,7 @@ local opttable = {
     },
 
     {group="Build options",
+    {"--verbose",           help="Echo whole commands while building."},
     {"-j:", "--jobs=",      help="Run up to N jobs at once.",
               metavar="N"},
     {"-c", "--clean", "--remove",

@@ -190,7 +190,6 @@ local function findlib(libpath, libname)
     end
     return nil, tried
 end
-            
 
 -- make_cmdline(options, conf, output, inputs, link)
 -- Return a command line table.
@@ -378,7 +377,11 @@ function scanner(bld, node)
         
         -- Start the scanner
         if not bld.opts.quiet then
-            print(make.cmdlinestr(cmdline))
+            if not bld.opts.verbose and bld.echo_func and bld.echo_func({
+                depends = {csource},
+                type = "c.scanner",
+            }) then --OK
+            else print(make.cmdlinestr(cmdline)) end
         end
         local proc = subprocess.popen(cmdline)
         local f = proc.stdout
@@ -456,6 +459,7 @@ function compile(bld, dest, source, options)
     if conf.CC_scan_method == "none" then
         bld:always_make(node)
     end
+    bld:type(node, "c.compile")
     return node
 end
 
@@ -489,7 +493,10 @@ function program(bld, dest, sources, options)
     end
     -- Link the program
     local cmd = make_cmdline(options, conf, dest, objects, true)
-    return bld:target(dest, objects, cmd)
+    return bld:type(
+        bld:target(dest, objects, cmd),
+        "c.program"
+    )
 end
 
 -- shared_library(bld, dest, sources, [options])
@@ -520,5 +527,8 @@ function shared_library(bld, dest, sources, options)
             "/DLL"
         )
     end
-    return program(bld, dest, sources, options)
+    return bld:type(
+        program(bld, dest, sources, options),
+        "c.shared_library"
+    )
 end

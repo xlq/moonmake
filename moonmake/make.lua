@@ -46,6 +46,7 @@ end
 -- Sometimes present:
 --     command - the command used to update the node. This is a table of
 --         arguments, eg. {"gcc", "-c", "-o", "main.o", "main.c"}
+--     type - string describing the type of node
 --     _proc - object representing the running process
 --     _mtime - the modification time of the file, or false if the file
 --         does not exist.
@@ -71,6 +72,9 @@ function builder.new()
         aliases = {},
         running_jobs = {},
         finished_jobs = {},
+        -- Function to print command strings for jobs. Must return true
+        -- to suppress the default command echoing.
+        echo_func = nil,
     }, builder)
 end
 
@@ -158,6 +162,17 @@ end
 function builder:always_make(node)
     node = self:node(node)
     node._always_make = true
+    return node
+end
+
+-- Set a type string for the given node. The type string should identify
+-- what the node is.
+-- For example, moonmake.tools.c.compile should set the type of the node it
+-- creates to something like "c.compile".
+function builder:type(node, str)
+    assert(is_builder(self), "builder expected as first argument")
+    node = self:node(node)
+    node.type = str
     return node
 end
 
@@ -293,7 +308,10 @@ function builder:examine(node)
         if need_update then
             -- TODO: after questioning, save state?
             if self.opts.question then os.exit(1) end
-            if not self.opts.quiet then print(cmdlinestr(node_command)) end
+            if not self.opts.quiet then
+                if not self.opts.verbose and self.echo_func and self.echo_func(node) then -- OK
+                else print(cmdlinestr(node_command)) end
+            end
             if not self.opts.dry_run then
                 -- Start the job
                 self:startjob(node)

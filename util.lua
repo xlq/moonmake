@@ -37,6 +37,11 @@ function table.join(...)
     return dest
 end
 
+-- Extend one table with another (positional elements only)
+function table.extend(dest, src)
+    for i, v in ipairs(src) do dest[i] = v end
+end
+
 -- tabrepli(t, [a, b, ...])
 -- Copy a table t and replace its integer items with a, b, ...
 function tabrepli(t, ...)

@@ -29,6 +29,7 @@ Sometimes present:
 --]]
 
 g_luamake_table = {}
+g_luamake_aliases = {}
 
 -- Print debugging message.
 function dbg(fmt, ...)
@@ -86,7 +87,7 @@ function target(inf)
     -- convert list of depends names to table references
     local depends = {}
     node.depends = depends
-    for _,dep_name in ipairs(depends_names) do
+    for _, dep_name in ipairs(depends_names) do
         local dep = get_node(dep_name)
         dep._has_revdeps = true -- something depends on this node
         depends[#depends + 1] = dep
@@ -101,6 +102,17 @@ function target(inf)
         "Target `%s' already defined", targ))
     dtable[targ] = node
     return node
+end
+
+-- Declare an alias node
+function alias(name, target_names)
+    if g_luamake_aliases[name] then error(string.format("alias `%s' already defined", name)) end
+    if type(target_names) == "string" then target_names = {target_names} end
+    local targets = {}
+    for _, tgt in ipairs(target_names) do
+        targets[#targets + 1] = get_node(tgt)
+    end
+    g_luamake_aliases[name] = targets
 end
 
 -- Load or create new state table and return it.
@@ -284,6 +296,7 @@ end
 -- A depth-first traversal of the dependency graph is done, and
 -- targets are updated during this traversal.
 function make()
+    local atable = g_luamake_aliases
     local dtable = g_luamake_table
     --print(tostring2.tostring2(dtable))
     
@@ -297,15 +310,21 @@ function make()
     if #opts > 0 then
         -- Build the targets specified on the command line
         for _, tgt in ipairs(opts) do
-            local node = dtable[tgt]
-            if not node then
-                io.stderr:write(string.format(
-                    "%s: *** No rule to make target `%s'. Stop.\n",
-                    argv0, tgt))
-                os.exit(2)
+            local nodes = atable[tgt]
+            if nodes then
+                table.extend(S, nodes)
+                S_pos = S_pos + #nodes
             else
-                S_pos = S_pos + 1
-                S[S_pos] = node
+                local node = dtable[tgt]
+                if node then
+                    S_pos = S_pos + 1
+                    S[S_pos] = node
+                else
+                    io.stderr:write(string.format(
+                        "%s: *** No rule to make target `%s'. Stop.\n",
+                        argv0, tgt))
+                    os.exit(2)
+                end
             end
         end
     else
@@ -339,8 +358,7 @@ function dump()
     function coll(x) str = str .. x end
     print("Dump of dependency table:")
     for node_name, node in pairs(dtable) do
-        str = ""
-        coll("target {" .. node_name .. ", {")
+        str = "target {" .. node_name .. ", {"
         for i = 1, #node.depends do
             coll("\"" .. node.depends[i].target .. "\"")
             if i < #node.depends then coll(", ") end
@@ -367,6 +385,16 @@ function dump()
         coll("}")
         print(str)
     end
+    print("Aliases:")
+    for name, nodes in pairs(g_luamake_aliases) do
+        str = "alias(\"" .. name .. "\", {"
+        for i = 1, #nodes do
+            coll("\"" .. nodes[i].target .. "\"")
+            if i < #nodes then coll(", ") end
+        end
+        coll("})")
+        print(str)
+    end
 end
 
 function clean_visit(to_clean, node)
@@ -384,17 +412,25 @@ end
 -- Remove targets and dependencies
 function clean()
     local dtable = g_luamake_table
+    local atable = g_luamake_aliases
     local to_clean = {}
     if #opts > 0 then
         -- Remove targets specified on command line, and their intermediates
         for _, tgt in ipairs(opts) do
-            local node = dtable[tgt]
-            if not node then
-                io.stderr:write(string.format(
-                    "%s: *** Cannot clean unknown target `%s'.\n",
-                    argv0, tgt))
+            local nodes = atable[tgt]
+            if nodes then
+                for _, node in ipairs(nodes) do
+                    clean_visit(to_clean, node)
+                end
             else
-                clean_visit(to_clean, node)
+                local node = dtable[tgt]
+                if node then
+                    clean_visit(to_clean, node)
+                else
+                    io.stderr:write(string.format(
+                        "%s: *** Cannot clean unknown target `%s'.\n",
+                        argv0, tgt))
+                end
             end
         end
     else

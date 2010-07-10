@@ -1,0 +1,534 @@
+#!/usr/bin/env lua
+package.path = debug.getinfo(1,"S").short_src:gsub("/[^/]*$", "") .. "/?.lua;" .. package.path
+require "optparse"
+require "tostring2"
+require "util"
+require "atexit"
+require "lfs"
+--require "profiler"
+
+argv0 = arg[0]  -- name of luamake executable
+
+--[[ g_luamake_table
+This is a table of [node.target] = node.
+A node is a table with the following fields:
+    target - name of the file the node represents.
+    depends - table of static dependencies for the node. May be empty but
+        this field is always present.
+Sometimes present:
+    command - the command used to update the node. This is a table of
+        arguments, eg. {"gcc", "-c", "-o", "main.o", "main.c"}
+    _mtime - the modification time of the file, or false if the file
+        does not exist.
+    _has_revdeps - set to true when it is discovered that the node
+        has reverse dependencies (i.e. other nodes depend on this one).
+    _visited - set to true during dependency traversal when the node has
+        been visited.
+    _updated - set to true after the node has been updated (updating a node
+        involves running the command, unless --dry-run is being used)
+--]]
+
+g_luamake_table = {}
+
+-- Print debugging message.
+function dbg(fmt, ...)
+    if opts.debug then
+        print(string.format(fmt, ...))
+    end
+end
+
+-- Get a node's target's mtime (cached).
+-- Returns the mtime, or false if file does not exist.
+function get_mtime(node)
+    local t = node._mtime
+    if not t then
+        t = lfs.attributes(node.target, "modification")
+        if not t then t = false end
+        node._mtime = t
+    end
+    return t
+end
+
+-- Invalidate all mtime cache records.
+function inval_all_mtime()
+    for _, node in pairs(g_luamake_table) do
+        node._mtime = nil
+    end
+end
+
+-- Get or create node by filename.
+function get_node(fname)
+    local dtable = g_luamake_table
+    local node = dtable[fname]
+    if not node then
+        node = {
+            target = fname,
+            depends = {},
+        }
+        dtable[fname] = node
+    end
+    return node
+end
+
+-- Declare dependencies and command for a target.
+-- The single inf argument is a table that forms a basis for the node structure.
+-- In particular the target and depends fields should be populated.
+-- As a short-hand, {T, D, C, ...} can be used instead
+-- of { target=T, depends=D, command=C, ... }.
+function target(inf)
+    local node = table.copy(inf)
+    local dtable = g_luamake_table
+    if node[1] then node.target = node[1] end
+    local depends_names = node[2] or node.depends
+    if type(depends_names) == "string" then
+        depends_names = {depends_names}
+    end
+    -- convert list of depends names to table references
+    local depends = {}
+    node.depends = depends
+    for _,dep_name in ipairs(depends_names) do
+        local dep = get_node(dep_name)
+        dep._has_revdeps = true -- something depends on this node
+        depends[#depends + 1] = dep
+    end
+    if node[3] then node.command = node[3] end
+    local targ = node.target
+    assert(targ, "no target specified")
+    -- remove positional items (were for convenience, not needed now)
+    for i = 1,#node do node[i] = nil end
+    -- put the node into the dependency table
+    assert(not dtable[targ], string.format(
+        "Target `%s' already defined", targ))
+    dtable[targ] = node
+    return node
+end
+
+-- Load or create new state table and return it.
+function loadstate()
+    if lfs.attributes(".luamake.state", "mode") then
+        return dofile(".luamake.state")
+    else
+        -- new state
+        return {
+            depends = {},
+            commands = {},
+        }
+    end
+end
+
+-- Write state to file.
+function savestate(state)
+    local f = io.open(".luamake.state", "w")
+    f:write("return " .. tostring2.tostring2(state) .. "\n")
+    f:close()
+end
+
+-- Quote a command line argument, for the shell
+-- (os.execute invokes the shell, unfortunately).
+function quote(arg)
+    local needs_quoting = arg:find("[ \t%!%$%^%&%*%(%)%~%[%]%\\%|%{%}%'%\"%;%<%>%?]")
+    if needs_quoting then
+        arg = "'" .. arg:gsub("%\\", "\\\\") .. "'"
+    end
+    return arg
+end
+
+-- Construct a command-line string ready to execute.
+function form_cmdline(cmd)
+    local s = ""
+    for i = 1,#cmd do
+        s = s .. quote(cmd[i]) .. " "
+    end
+    return s:sub(1,-2)
+end
+
+-- Run the dependency scanner for a node
+-- Returns new dependency list
+function run_scanner(state, node)
+    local dyn_deps = node:scanner()
+    state.depends[node.target] = dyn_deps
+    return dyn_deps
+end
+
+-- Handle dynamic dependencies.
+-- Returns new need_update value
+function do_dyn_deps(state, node, need_update)
+    local dyn_deps = state.depends[node.target]
+    local scanner_run = false
+    -- NOTE: do_dyn_deps wouldn't be called if node didn't exist
+    local node_mtime = node._mtime
+    -- Run the dependency scanner if:
+    --  - there is one, but there's no old dependency information
+    --  - not up-to-date
+    if need_update or not dyn_deps then
+        dbg("Running scanner (needupdate=%s)", tostring(need_update))
+        scanner_run = true
+        dyn_deps = run_scanner(state, node)
+    end
+    if not need_update then
+        -- Check dynamic dependencies
+        for _, dep_name in ipairs(dyn_deps) do
+            local dep = get_node(dep_name)
+            -- If dep is not a source node (i.e. it has a rule to generate it)
+            -- and it is not in the normal dependencies list, we could've run
+            -- things in the wrong order before dependency scanning. This is
+            -- bad. If dep *is* in normal dependencies list, it will have been
+            -- visited by now, so we can check dep._visited to catch *some* cases.
+            if dep.command and not dep._visited then
+                io.stderr:write(string.format(
+                    "%s: warning: `%s' depends on generated target `%s', "
+                    .. "but `%s' is not in the dependencies list\n",
+                    argv0, node.target, dep_name, node.target))
+            end
+            local dep_mtime = get_mtime(dep)
+            if not dep_mtime or dep_mtime > node_mtime then
+                need_update = true
+                -- A dynamic dep has changed, so if we haven't run the scanner
+                -- already, we'll need to, to maintain consistency.
+                if not scanner_run then
+                    scanner_run = true
+                    run_scanner(state, node)
+                end
+                -- We don't need to check the dynamic deps any further
+                break
+            end
+        end
+    end
+    return need_update
+end
+    
+-- Visit a node in depth-first traversal.
+-- Return value:
+--    false   - node not updated
+--    true    - node updated (parent nodes need updating too)
+function visit_node(state, node)
+    if not node._visited then
+        local node_name = node.target
+        dbg("Visiting: %s", node_name)
+        node._visited = true
+        local node_mtime = get_mtime(node)
+        local need_update = opts.always_make
+        if not node_mtime then
+            -- target does not exist
+            dbg("Target `%s' does not exist", node_name)
+            need_update = true
+        end
+        -- update dependencies
+        local depends = node.depends
+        for i = 1, #depends do
+            local dep = depends[i]
+            if visit_node(state, dep) then
+                -- dep just got updated
+                need_update = true
+            else
+                -- dep didn't get updated, but is the file newer?
+                local dep_mtime = dep._mtime
+                assert(dep_mtime ~= nil, "dep_mtime is nil and shouldn't be")
+                if not dep_mtime then
+                    -- dep does not exist
+                    dbg("Dep `%s' does not exist (yet)", dep.target)
+                    need_update = true
+                elseif node_mtime and dep_mtime > node_mtime then
+                    -- dep is newer
+                    dbg("Dep `%s' newer than `%s'", dep.target, node_name)
+                    need_update = true
+                end
+            end
+        end
+        local node_command = node.command
+        if node_command then
+            -- Form command line
+            local cmdline = form_cmdline(node_command)
+            local oldcmdline = state.commands[node_name]
+            -- Has command line changed?
+            if oldcmdline and oldcmdline ~= cmdline then
+                dbg("Command for %s has changed", node_name)
+                need_update = true
+            end
+            state.commands[node_name] = cmdline
+            if need_update and opts.question then os.exit(1) end
+            -- Handle dynamic dependencies
+            if node.scanner then
+                need_update = do_dyn_deps(state, node, need_update)
+            end
+            if need_update then
+                -- TODO: after questioning, save state?
+                if opts.question then os.exit(1) end
+                if not opts.quiet then print(cmdline) end
+                if not opts.dry_run then
+                    local returncode = os.execute(cmdline)
+                    if returncode ~= 0 then
+                        error(string.format(
+                            "%s exited with error code %d",
+                            node_command[1], returncode))
+                    end
+                end
+            end
+        end
+        if need_update then
+            -- Invalidate stored mtime
+            node._mtime = nil
+            node._updated = true
+            return true
+        else
+            return false
+        end
+    else
+        -- Node already visited
+        dbg("Re-visiting: %s", node.target)
+        return node._updated
+    end
+end
+
+-- Main build function.
+-- A depth-first traversal of the dependency graph is done, and
+-- targets are updated during this traversal.
+function make()
+    local dtable = g_luamake_table
+    --print(tostring2.tostring2(dtable))
+    
+    -- Reset all fields (for repeating algorithm for profiling)
+    for _, node in pairs(dtable) do
+        node._visited = false
+    end
+
+    local S = {}
+    local S_pos = 0
+    if #opts > 0 then
+        -- Build the targets specified on the command line
+        for _, tgt in ipairs(opts) do
+            local node = dtable[tgt]
+            if not node then
+                io.stderr:write(string.format(
+                    "%s: *** No rule to make target `%s'. Stop.\n",
+                    argv0, tgt))
+                os.exit(2)
+            else
+                S_pos = S_pos + 1
+                S[S_pos] = node
+            end
+        end
+    else
+        -- Find all nodes that nothing depends on
+        for _, node in pairs(dtable) do
+            if not node._has_revdeps then
+                S_pos = S_pos + 1
+                S[S_pos] = node
+            end
+        end
+    end
+
+    local state = loadstate()
+    
+    -- Visit all these nodes
+    for i = 1, S_pos do
+        local node = S[i]
+        dbg("Initial visit: %s", node.target)
+        visit_node(state, node)
+    end
+
+    dbg("Saving state")
+    savestate(state)
+    --inval_all_mtime()
+end
+
+-- Dump dependency table
+function dump()
+    local dtable = g_luamake_table
+    local str = ""
+    function coll(x) str = str .. x end
+    print("Dump of dependency table:")
+    for node_name, node in pairs(dtable) do
+        str = ""
+        coll("target {" .. node_name .. ", {")
+        for i = 1, #node.depends do
+            coll("\"" .. node.depends[i].target .. "\"")
+            if i < #node.depends then coll(", ") end
+        end
+        coll("}")
+        if node.command then
+            coll(", {")
+            for i = 1, #node.command do
+                coll("\"" .. node.command[i] .. "\"")
+                if i < #node.command then coll(", ") end
+            end
+            coll("}")
+        end
+        if node.scanner then
+            local dbg = debug.getinfo(node.scanner, "nS")
+            coll(", scanner=[")
+            if dbg.name then
+                coll(dbg.namewhat .. " \"" .. dbg.name .. "\"")
+            else
+                coll(dbg.short_src .. ":" .. dbg.linedefined)
+            end
+            coll("]")
+        end
+        coll("}")
+        print(str)
+    end
+end
+
+function clean_visit(to_clean, node)
+    if not node._visited then
+        node._visited = true
+        if node.command and get_mtime(node) then
+            to_clean[#to_clean + 1] = node
+        end
+        for _, dep in ipairs(node.depends) do
+            clean_visit(to_clean, dep)
+        end
+    end
+end
+
+-- Remove targets and dependencies
+function clean()
+    local dtable = g_luamake_table
+    local to_clean = {}
+    if #opts > 0 then
+        -- Remove targets specified on command line, and their intermediates
+        for _, tgt in ipairs(opts) do
+            local node = dtable[tgt]
+            if not node then
+                io.stderr:write(string.format(
+                    "%s: *** Cannot clean unknown target `%s'.\n",
+                    argv0, tgt))
+            else
+                clean_visit(to_clean, node)
+            end
+        end
+    else
+        -- Remove all targets
+        for _, node in pairs(dtable) do
+            if node.command and get_mtime(node) then
+                to_clean[#to_clean + 1] = node
+            end
+        end
+    end
+    -- TODO: dry run
+    if next(to_clean) then
+        local dry_run = opts.dry_run
+        io.stdout:write(dry_run and "Would delete:" or "Deleting:")
+        for _, node in ipairs(to_clean) do
+            io.stdout:write(" " .. node.target)
+            io.stdout:flush()
+            if not dry_run then
+                local a, b = os.remove(node.target)
+                if not a then
+                    io.stdout:write("\n")
+                    io.stdout:flush()
+                    io.stderr:write(string.format(
+                        "Cannot delete %s: %s\n",
+                        node.target, b))
+                    io.stderr:write("Aborting\n")
+                    os.exit(1)
+                end
+            end
+        end
+        io.stdout:write("\n")
+    else
+        print("Nothing to clean.")
+    end
+end
+
+
+-- Return base, ext from a filename
+function splitext(fname)
+    return fname:match("^(.*)(%.[^%.]+)$")
+end
+
+-- Swap file extensions
+function swapext(fname, newext)
+    return splitext(fname) .. newext
+end
+
+-- Get options for a rule generator
+-- inf is a table with options in, and
+-- name is the name of the option to get.
+-- If name:lower() is in inf, this will be
+-- combined with a global variable.
+-- If name:upper() is in inf, this will be used
+-- exclusively.
+function getruleopt(inf, name)
+    if inf[name:upper()] then
+        return inf[name:upper()]
+    elseif inf[name:lower()] then
+        return table.join(getfenv()[name] or {}, inf[name:lower()])
+    else
+        return getfenv()[name] or {}
+    end
+end
+
+opts, err = optparse.optparse {
+    {"--debug",                "debug"},
+    {"--dump",                 "dump"},
+    {"-B",  "--always-make",   "always_make"},
+    {"-f:", "--file=",         "file"},
+    {"-h",  "--help",          "help"},
+    {"-q",  "--question",      "question"},
+    {"-v",  "--version",       "version"},
+    {"-c", "--clean", "--remove", "clean"},
+    {"-n", "--just-print", "--dry-run", "--recon", "dry_run"},
+    {"-s", "--silent", "--quiet", "quiet"},
+}
+if not opts then
+    io.stderr:write(arg[0]..": "..err.."\n")
+    os.exit(2)
+end
+if opts.help then
+    print(string.format([[
+Usage: %s [options...] [target...]
+  If no targets are specified, all targets below the current directory
+  are built.
+Options:
+  -c, --clean, --remove       Remove specified targets and dependencies.
+  -B, --always-make           Unconditionally make all targets.
+  -fFILE, --file=FILE         Read FILE as Takefile.
+  -h, --help                  Print this message and exit.
+  -n, --just-print, --dry-run, --recon
+                              Don't actually run any commands; just print them.
+  -q, --question              Run no commands; exit status says if up-to-date.
+  -s, --silent, --quiet       Don't echo commands.
+  -v, --version               Print the version of luamake and exit.
+  --debug                     Print unhelpful debug messages.
+  --dump                      Dump the dependency table.]],
+    arg[0]))
+    os.exit(0)
+end
+if opts.version then
+    print("No version information.")
+    os.exit(0)
+end
+local file = opts.file or "Lakefile"
+if not lfs.attributes(file, "mode") then
+    if opts.file then
+        io.stderr:write(string.format(
+            "%s: *** File not found: %s\n", argv0, file))
+    else
+        io.stderr:write(string.format(
+            "%s: *** No Lakefile found. Stop.\n", argv0))
+    end
+    os.exit(3)
+end
+cnt = 0
+dofile(file)
+if opts.dump then dump()
+  elseif opts.clean then clean()
+  else make() end
+
+
+
+
+--profiler.start("lprof.out")
+--for i = 0,0 do
+--for i = 0,10000 do
+--    make()
+--end
+--profiler.stop()
+--print(cnt)
+
+--[[
+TODO:
+    - list of dependencies is a dependency itself!
+    - install, etc.
+--]]

@@ -3,6 +3,7 @@ package.path = debug.getinfo(1,"S").short_src:gsub("/[^/]*$", "") .. "/?.lua;" .
 require "optparse"
 require "tostring2"
 require "util"
+require "subprocess"
 require "atexit"
 require "lfs"
 --require "profiler"
@@ -105,14 +106,14 @@ function target(inf)
 end
 
 -- Declare an alias node
+-- The alias 'default' is built by default.
 function alias(name, target_names)
-    if g_luamake_aliases[name] then error(string.format("alias `%s' already defined", name)) end
+    local targets = g_luamake_aliases[name] or {}
+    g_luamake_aliases[name] = targets
     if type(target_names) == "string" then target_names = {target_names} end
-    local targets = {}
     for _, tgt in ipairs(target_names) do
         targets[#targets + 1] = get_node(tgt)
     end
-    g_luamake_aliases[name] = targets
 end
 
 -- Load or create new state table and return it.
@@ -133,25 +134,6 @@ function savestate(state)
     local f = io.open(".luamake.state", "w")
     f:write("return " .. tostring2.tostring2(state) .. "\n")
     f:close()
-end
-
--- Quote a command line argument, for the shell
--- (os.execute invokes the shell, unfortunately).
-function quote(arg)
-    local needs_quoting = arg:find("[ \t%!%$%^%&%*%(%)%~%[%]%\\%|%{%}%'%\"%;%<%>%?]")
-    if needs_quoting then
-        arg = "'" .. arg:gsub("%\\", "\\\\") .. "'"
-    end
-    return arg
-end
-
--- Construct a command-line string ready to execute.
-function form_cmdline(cmd)
-    local s = ""
-    for i = 1,#cmd do
-        s = s .. quote(cmd[i]) .. " "
-    end
-    return s:sub(1,-2)
 end
 
 -- Run the dependency scanner for a node
@@ -250,7 +232,7 @@ function visit_node(state, node)
         local node_command = node.command
         if node_command then
             -- Form command line
-            local cmdline = form_cmdline(node_command)
+            local cmdline = subprocess.form_cmdline(node_command)
             local oldcmdline = state.commands[node_name]
             -- Has command line changed?
             if oldcmdline and oldcmdline ~= cmdline then
@@ -305,20 +287,18 @@ function make()
         node._visited = false
     end
 
-    local S = {}
-    local S_pos = 0
+    local S
     if #opts > 0 then
         -- Build the targets specified on the command line
+        S = {}
         for _, tgt in ipairs(opts) do
             local nodes = atable[tgt]
             if nodes then
                 table.extend(S, nodes)
-                S_pos = S_pos + #nodes
             else
                 local node = dtable[tgt]
                 if node then
-                    S_pos = S_pos + 1
-                    S[S_pos] = node
+                    S[#S + 1] = node
                 else
                     io.stderr:write(string.format(
                         "%s: *** No rule to make target `%s'. Stop.\n",
@@ -328,11 +308,14 @@ function make()
             end
         end
     else
-        -- Find all nodes that nothing depends on
-        for _, node in pairs(dtable) do
-            if not node._has_revdeps then
-                S_pos = S_pos + 1
-                S[S_pos] = node
+        S = g_luamake_aliases.default
+        if not S then
+            S = {}
+            -- Find all nodes that nothing depends on
+            for _, node in pairs(dtable) do
+                if not node._has_revdeps then
+                    S[#S + 1] = node
+                end
             end
         end
     end
@@ -340,8 +323,7 @@ function make()
     local state = loadstate()
     
     -- Visit all these nodes
-    for i = 1, S_pos do
-        local node = S[i]
+    for _, node in ipairs(S) do
         dbg("Initial visit: %s", node.target)
         visit_node(state, node)
     end
@@ -410,6 +392,8 @@ function clean_visit(to_clean, node)
 end
 
 -- Remove targets and dependencies
+-- TODO: tidy this function up, factor out
+--   code common with make()
 function clean()
     local dtable = g_luamake_table
     local atable = g_luamake_aliases
@@ -435,9 +419,18 @@ function clean()
         end
     else
         -- Remove all targets
-        for _, node in pairs(dtable) do
-            if node.command and get_mtime(node) then
-                to_clean[#to_clean + 1] = node
+        local S = g_luamake_aliases.default
+        if S then
+            for _, node in ipairs(S) do
+                if node.command and get_mtime(node) then
+                    to_clean[#to_clean + 1] = node
+                end
+            end
+        else
+            for _, node in pairs(dtable) do
+                if node.command and get_mtime(node) then
+                    to_clean[#to_clean + 1] = node
+                end
             end
         end
     end
@@ -467,31 +460,20 @@ function clean()
     end
 end
 
-
--- Return base, ext from a filename
-function splitext(fname)
-    return fname:match("^(.*)(%.[^%.]+)$")
-end
-
--- Swap file extensions
-function swapext(fname, newext)
-    return splitext(fname) .. newext
-end
-
 -- Get options for a rule generator
--- inf is a table with options in, and
+-- inf contains the arguments of the rule generator.
 -- name is the name of the option to get.
 -- If name:lower() is in inf, this will be
 -- combined with a global variable.
 -- If name:upper() is in inf, this will be used
 -- exclusively.
-function getruleopt(inf, name)
+function _G.getruleopt(inf, name)
     if inf[name:upper()] then
         return inf[name:upper()]
     elseif inf[name:lower()] then
-        return table.join(getfenv()[name] or {}, inf[name:lower()])
+        return table.join(_G[name] or {}, inf[name:lower()])
     else
-        return getfenv()[name] or {}
+        return _G[name] or {}
     end
 end
 

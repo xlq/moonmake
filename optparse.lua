@@ -1,61 +1,135 @@
---[[
-  optparse(opts, [args])
-  Parse command-line arguments
-  opts:
-      This is a list of {flag, flag, ..., dest} groups, where
-      each flag is a flag name (eg. --help).
-      The suffix of each flag is:
-        (no suffix)   boolean flag
-        :             option takes an argument, eg. -b: takes -bARG or -b ARG
-        =             long option takes an argument, eg. --file= takes --file=ARG or --file ARG
-      dest is the vairable name to store the result in.
-  args:
-      Specifies a list of arguments to parse. By default it is the global
-      arg (the process's arguments).
-  Return value:
-      Returns a table of positional and optional arguments.
-      Positional arguments are keyed by 1, 2, ... and
-      the optional arguments are keyed by the name given in 
-      the opts table.
-      On error, returns nil, msg
-  Example:
-      optparse {
-        {"-h",  "--help",  "help"},
-        {"-f:", "--file=", "file"},
-      }
---]]
+-- Command-line option parser.
+-- See documentation optparse.html for details.
 
 module(..., package.seeall)
+util = require "moonmake.util"
 
-function optparse(opts, args)
-    args = args or arg
-    local flags = {}
-    -- process opts
-    for _,o in ipairs(opts) do
-        local dest = o[#o]
-        for i = 1,#o-1 do
-            local flag = o[i]
-            local lastchar = flag:sub(-1)
-            if lastchar == ":" or lastchar == "=" then
-                flag = flag:sub(0, -2)
-            else
-                lastchar = ""
-            end
-            flags[flag] = {lastchar, dest}
+local insert = table.insert
+
+-- Pad a string with spaces to n chars
+local function pad(s, n)
+    return s .. string.rep(" ", n - s:len())
+end
+
+-- Wrap a string and put lines into 'out' list
+local function wrap_string(out, str, indent, width, initindent)
+    local len = str:len() -- length of str
+    local strpos = 1 -- position in str
+    local n = 1 -- line number
+    local indentstr = string.rep(" ", indent)
+    assert(indent < width)
+    while strpos < len do
+        -- find a good place to break the string
+        -- XXX: can this search be done with built-ins?
+        local breakp = strpos + (width - indent) - 1
+        if breakp < len then
+            -- move break point further back into string to find
+            -- a space, but not too far!
+            while breakp > (strpos + indent + 10)
+              and str:sub(breakp, breakp) ~= " "
+            do breakp = breakp - 1 end
+        else
+            -- no breaking needed
+            breakp = len
+        end
+        -- output this bit of string
+        if n == 1 and initindent then
+            insert(out, pad(initindent, indent) .. str:sub(strpos, breakp))
+        else
+            insert(out, indentstr .. str:sub(strpos, breakp))
+        end
+        n = n + 1
+        strpos = breakp + 1
+        -- don't put whitespace on next line
+        while str:sub(strpos, strpos) == " " do strpos = strpos + 1 end
+
+    end
+end
+
+-- Format table items in 'lines' into nice columns.
+-- Items in 'lines' will be either strings or 2-tuples of strings.
+-- Return new table with just strings in
+local function format_lines(lines)
+    -- Calculate size of first column, within sensible limits.
+    local maxcol1 = 23 -- 23 columns ought to be enough for anybody.
+    local col1 = 0
+    for i, v in ipairs(lines) do
+        if type(v) == "table" then
+            local l = v[1]:len()
+            if l > col1 then col1 = l end
         end
     end
+    col1 = col1 + 3 -- leave a comfortable 3-space padding
+    if col1 > maxcol1 then col1 = maxcol1 end
+    -- Make output table
+    local out = {}
+    for i, v in ipairs(lines) do
+        if type(v) == "table" then
+            local initindent
+            if not v[2] or v[1]:len() + 1 > col1 then
+                -- too large - put flags on a line on their own
+                wrap_string(out, v[1], 0, 80)
+            else
+                initindent = v[1]
+            end
+            if v[2] then
+                wrap_string(out, v[2] or "", col1, 80, initindent)
+            end
+        else
+            --wrap_string(out, v, 0, 80)
+            insert(out, v)
+        end
+    end
+    return out
+end
+
+
+-- Guess an option's dest variable
+local function guessdest(o)
+    -- Find longest flag name
+    local long, longlen = nil, 0
+    for i,v in ipairs(o) do
+        if #v > longlen then
+            long, longlen = v, #v
+        end
+    end
+    if long then
+        -- Remove qualifiers
+        return long:match("%a[%w%-_]*"):gsub("%-", "_")
+    end
+end
+
+function parse(opts, args)
+    args = args or arg
+
+    -- process option table
+    local flags = {}
+    local function process_opts(opts)
+        for _, o in ipairs(opts) do
+            if o.group then process_opts(o)
+            else
+                local dest = o.dest or guessdest(o)
+                for _, flag in ipairs(o) do
+                    local flag, junk, lastchar = flag:match("^((.*)[^=:])([=:]?)$")
+                    flags[flag] = {lastchar, dest}
+                end
+            end
+        end
+    end
+    process_opts(opts)
+
+    -- parse args
+    args = args or arg
     -- parse args
     local result = {}
     local i = 1
     while i <= #args do
         local arg = args[i]
-        if arg:sub(1, 1) == "-" then
+        if util.startswith(arg, "-") then
             -- is an option
-            local eq_idx = arg:find("=", 1, true)
-            if eq_idx then
+            local optname, eq, optvalue = arg:match("([^=]*)(=?)(.*)$")
+            if eq == "=" then
                 -- is a --name=value option
-                local optname = arg:sub(1, eq_idx - 1)
-                local optvalue = arg:sub(eq_idx + 1)
                 local o = flags[optname]
                 if o then
                     local mode, dest = unpack(o)
@@ -115,4 +189,51 @@ function optparse(opts, args)
         i = i + 1
     end
     return result
+end
+
+local function do_help(opts, lines)
+    local glines = {}
+    for _, o in ipairs(opts) do
+        if o.group then
+            insert(glines, "")
+            insert(glines, o.group..":")
+            util.merge(glines, o.help)
+            do_help(o, glines)
+        else
+            local flagstrbits = {}
+            for _, flag in ipairs(o) do
+                local flag, junk, lastchar = flag:match("^((.*)[^=:])([=:]?)$")
+                if lastchar ~= "" then
+                    -- XXX: don't re-calc metavar for every flag of o
+                    local metavar = o.metavar
+                    if not metavar then
+                        metavar = o.dest or guessdest(o) or "XXX"
+                        metavar = metavar:upper()
+                    end
+                    insert(flagstrbits, flag..(lastchar == "=" and lastchar or " ")..metavar)
+                else
+                    insert(flagstrbits, flag)
+                end
+            end
+            insert(lines, ({"  "..table.concat(flagstrbits, ", "), o.help}))
+        end
+    end
+    --lines:append("")
+    util.merge(lines, glines)
+end
+
+function help(opts, file)
+    file = file or io.stdout
+
+    -- Make table for lines of text.
+    -- Some entires here can be tables, for columnar formatting.
+    local lines = {}
+    if opts.help then
+        insert(lines, (opts.help:gsub("%%prog", arg[0])))
+    end
+    -- lines:append("") too spaced out
+    insert(lines, "Options:")
+    do_help(opts, lines)
+    lines = format_lines(lines)
+    file:write(table.concat(lines, "\n"), "\n")
 end

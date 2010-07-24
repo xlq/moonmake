@@ -1,0 +1,91 @@
+#!/usr/bin/env lua
+--require "lfs"
+conf = require "moonmake.conf"
+make = require "moonmake.make"
+util = require "moonmake.util"
+optparse = require "moonmake.optparse"
+local list = require "moonmake.flexilist".list
+
+--local cwd = arg[0]:match("^(.*)/[^/]*$")
+--package.path = (cwd:sub(1,1)=="/" and cwd or lfs.currentdir().."/"..cwd)
+--            .. "/?.lua;" .. package.path
+
+--if not lfs.attributes("Moonfile", "mode") then
+--    io.stderr:write(arg[0], " *** No Moonfile found. Stop.\n")
+--    os.exit(1)
+--end
+local Moonfile, err = loadfile("Moonfile")
+--if not Moonfile then
+--    io.stderr:write(err, "\n")
+--    os.exit(1)
+--end
+local env = {}
+package.seeall(env)
+if Moonfile then
+    setfenv(Moonfile, env)
+    Moonfile()
+end
+
+local opttable = {
+    help="Usage: %prog [options...] configure\n"
+      .. "Usage: %prog [options...] [targets...]\n",
+    {"-h", "--help",        help="Show this message and exit."},
+    {"-v", "--version",     help="Print version of moonmake and exit."},
+    --{"-f:", "--file=",      help="Read FILE as Moonfile"},
+
+    {group="Build options",
+    {"-j:", "--jobs=",      help="Run up to N jobs at once.",
+              metavar="N"},
+    {"-c", "--clean", "--remove",
+              dest="clean", help="Remove specified targets and dependencies. "
+                                    .. "This only removes files that can be regenerated."},
+    {"-B", "--always-make", help="Assume nothing is up to date."},
+    {"-n", "--just-print", "--dry-run", "--recon",
+            dest="dry_run", help="Don't actually remake any targets; just print them. "
+                              .. "Note that dependency scanning may still be done."},
+    {"-q", "--question",    help="Run no commands. Exit status says if up to date."},
+    {"-s", "--silent", "--quiet",
+             dest="quiet",  help="Don't echo commands."},
+    {"--debug",             help="Print unhelpful debug messages."},
+    {"--dump",              help="Dump the dependency table."},
+    },
+}
+if env.options then
+    env.options(opttable)
+end
+local opts = assert(optparse.parse(opttable))
+if opts.help then
+    optparse.help(opttable)
+    os.exit(0)
+end
+if not Moonfile then
+    io.stderr:write(err, "\n", arg[0], ": *** No Moonfile found. Stop.\n")
+    os.exit(1)
+end
+if util.isearch(opts, "configure") then
+    if not env.configure then
+        print("No configure function in Moonfile.")
+    else
+        local conf = conf.newconf()
+        env.configure(conf)
+        conf:save("config.log")
+    end
+else
+    if not env.build then
+        print("No build function in Moonfile.")
+    else
+        local conf = conf.newconf()
+        conf:load("config.log")
+        local bld = make.builder.new()
+        bld.opts = opts
+        bld.conf = conf
+        env.build(bld)
+        if opts.dump then
+            bld:dump()
+        elseif opts.clean then
+            bld:clean()
+        else
+            bld:make()
+        end
+    end
+end

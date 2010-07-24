@@ -1,0 +1,146 @@
+optparse
+========
+
+== Introduction
+
+The optparse module allows you to create a single table to parse
+command-line options and display formatted help messages. It is similar
+to Python's `optparse` module, but has a few important differences.
+
+== Dependencies
+
+`util`, `flexilist`
+
+== Compatibility
+
+Written purely in Lua, and should work on all platforms supported by
+Lua, however it only supports the UNIX-style options with hyphens (-h,
+--help) and not the Windows-style /? and /opt options.
+
+== Functions
+
+=== `optparse.parse(opts, [args])`
+`opts` is the <<opts,option table>>. `args` is an optional list of arguments
+to parse. If not specified, the process's command line (the
+global variable `arg`) is used.
+
+===== Return value
+On success, returns a table containing the options (string keys) and positional
+arguments (integer keys).
+
+On failure, returns `nil, errmsg`.
+
+=== `optparse.help(opts, [file])`
+`opts` is the <<opts,option table>>. `file` is the file to print the help to
+(default `io.stdout`).
+
+[[optiontable]]
+== Option table
+This is a normal Lua table that describes the command-line options.
+-----
+{   help="Usage: %prog [options...] args",
+    option or group item,
+    option or group item,
+    ...
+}
+-----
+`help` is an optional string, usually to describe the overall command
+syntax, that is printed at the start of the help message. All instances
+of the string "`%prog`" are replaced with the program name (global `arg[0]`).
+This string may contain newlines.
+This field does not affect parsing.
+
+The other items are option or group items.
+
+=== Option items
+Option items are Lua tables that should have the following format:
+
+-----
+    {   string, string, ...,
+        dest=DEST,       -- optional
+        metavar=METAVAR, -- optional
+        help=HELP,       -- optional
+    }
+-----
+The option item contains any number of positional string elements with
+one of the following formats (with X and XXX replacing any characters):
+
+* `"-X"` or `"--XXX"` - short or long boolean options. The relevant field
+in the table returned by `optparse.parse` will be set to `true` when
+this option is found.
+* `"-X:"` - short option that takes an argument. The relevant field in
+the table returned by `optparse.parse` will be set to the found
+argument string. For example, `"-a:"` would match `"-aYYY"`,
+`"-a YYY"`, `"-xaYYY"` or `"-xa YYY"` (where x is another short option,
+and "YYY" would become the argument).
+* `"--XXX="` - long option that takes an argument. For example,
+`"--output="` would match `"--output=YYY"` or `"--output YYY"`.
+
+Option items can also have the following fields:
+
+* `dest` - this name is the field name to use in the table
+returned by `optparse.parse` for this option. If not specified, the
+variable name is derived from the longest flag name: `"help"` will be
+used for `"--help"` and so on.
+* `metavar` - this name is used to describe options that take arguments.
+If it is not specified, it is derived from the longest flag name, in the
+same way as with `dest` but converted to upper-case.
+For example, the following option item
+-----
+    {"-o:", "--output=", metavar="FILE"}
+-----
+will be described as "-o FILE, --output=FILE".
+The metavar does not affect parsing.
+
+* `help` - this describes the option in the help message. Although
+optional, if you omit this, your users may be confused. The help string
+is automatically formatted, so don't put newlines in it.
+
+=== Group items
+Group items are Lua tables that should have the following format:
+
+-----
+    {   group=GROUP,
+        help=HELP,      -- optional
+        option or group item,
+        option or group item,
+        ...
+    }
+-----
+Group items help to group options into logical categories. Help for the groups
+is always output _after_ the top-level options. The named fields are as follows:
+
+* `group` - mandatory group title. This is a human-readable string such
+as "Dangerous options".
+* `help` - an optional help string to describe the group. This may
+contain newlines and is not formatted.
+
+== Example
+
+Here is an example program that uses optparse.
+
+-----
+require "optparse"
+
+local opts = {
+    help="Usage: %prog [options...] args\n"
+      .. "This should be obvious.",
+    {"-h", "--help", help="Show this message and exit"}, -- this isn't added automatically!
+    {"-o:", "--output=", metavar="FILE", help="Write output to FILE"},
+    {"-v", dest="verbose", help="Be verbose"},
+    {   group="Funny options",
+        help="These options are hilarious. Use with care.",
+        {"--bad-joke", help="Crack a bad joke"},
+        {"--pun=", metavar="N", help="Use pun level N"},
+    },
+    {"-p", "--patch", "--patch-hole-in-dam", "--fix-wall"},
+    {   group="Bugs",
+        help="Report bugs to bugs@eraseallfilesvirus.com",
+    }
+}
+
+local vars, errmsg = optparse.parse(opts)
+if not vars then error(errmsg) end
+if vars.help then optparse.help(opts); os.exit(0) end
+io.stdout:write("Positional args: ", table.concat(vars, ", "), "\n")
+-----

@@ -4,7 +4,6 @@ conf = require "moonmake.conf"
 make = require "moonmake.make"
 util = require "moonmake.util"
 optparse = require "moonmake.optparse"
-local list = require "moonmake.flexilist".list
 
 --local cwd = arg[0]:match("^(.*)/[^/]*$")
 --package.path = (cwd:sub(1,1)=="/" and cwd or lfs.currentdir().."/"..cwd)

@@ -2,6 +2,13 @@ module(..., package.seeall)
 require "subprocess"
 util = require "moonmake.util"
 
+-- Find pkg-config program
+function configure(conf)
+    assert(type(conf) == "table" and conf.test, "expected conf object as first argument")
+    conf.PKGCONFIG = conf:findprogram{"pkg-config"}
+    return conf.PKGCONFIG
+end
+
 -- Check configuration for package 'pkg'
 -- Return CFLAGS, LDFLAGS
 -- or nil if package not found.
@@ -11,7 +18,7 @@ function getflags(conf, pkg)
     conf:test("Checking for package "..pkg)
     local cflags, ldflags
     local exitcode, output = subprocess.call_capture {
-        "pkg-config", "--cflags", pkg,
+        conf.PKGCONFIG, "--cflags", pkg,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT }
     if exitcode ~= 0 then
@@ -20,7 +27,7 @@ function getflags(conf, pkg)
     end
     cflags = util.totable(output:gmatch("[^ \n]+"))
     local exitcode, output = subprocess.call_capture {
-        "pkg-config", "--libs", pkg,
+        conf.PKGCONFIG, "--libs", pkg,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT }
     if exitcode ~= 0 then

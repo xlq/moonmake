@@ -172,8 +172,8 @@ function scanner(bld, node)
     -- local cmdline = string.format("%s -M %s > %s",
     --     quote(cc), quote(csource.target),
     --     quote(c_scanner_outfname))
-    local cmdline = {cc, "-M", csource.target,
-      stdout=subprocess.PIPE}
+    local cmdline = util.merge({cc}, node.CFLAGS, {"-M", csource.target,
+      stdout=subprocess.PIPE})
     if not bld.opts.quiet then
         print(make.cmdlinestr(cmdline))
     end
@@ -244,10 +244,12 @@ function c:compile(kwargs)
     local cflags = kwargs.CFLAGS or {}
     local incflags = make_incflags(kwargs.CPPPATH or {})
     --print(util.repr(cflags), util.repr(incflags))
-    return bld:target{tgt, src,
+    local node = bld:target{tgt, src,
         util.merge({cc}, cflags, incflags, {"-c", "-o", tgt, src}),
-        scanner = scanner
+        scanner = scanner,
     }
+    node.CFLAGS = util.merge({}, cflags, incflags)
+    return node
 end
 
 -- c:program {bld, dest, sources, options...}

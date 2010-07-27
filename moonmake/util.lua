@@ -308,25 +308,29 @@ end
 function xsplit(str, sep, nmax)
     sep = sep or " "
     local pos = 1
-    return function (sep, nmatch)
+    local nmatch = 0
+    return function ()
         if pos == -1 then return nil
         elseif nmatch == nmax then
             local r = str:sub(pos)
             pos = -1
-            return nmatch + 1, r
+            return r, nmatch + 1
         else
             local a, b = str:find(sep, pos, true)
             if a then
+                -- next match
                 local r = str:sub(pos, a - 1)
                 pos = b + 1
-                return nmatch + 1, r
+                nmatch = nmatch + 1
+                return r, nmatch
             else
+                -- no more matches
                 local r = str:sub(pos)
                 pos = -1
-                return nmatch + 1, r
+                return r, nmatch + 1
             end
         end
-    end, sep, 0
+    end
 end
 
 -- split(str, [sep=" "], [nmax])

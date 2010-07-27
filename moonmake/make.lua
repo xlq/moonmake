@@ -17,6 +17,7 @@ argv0 = arg[0]  -- name of luamake executable
 
 -- Quote a command line argument, for the shell
 function quote(arg)
+    assert(type(arg) == "string", "expected string as first argument")
     local needs_quoting = arg:find("[ \t%!%$%^%&%*%(%)%~%[%]%\\%|%{%}%'%\"%;%<%>%?]")
     if needs_quoting then
         arg = "'" .. arg:gsub("%\\", "\\\\") .. "'"
@@ -105,6 +106,15 @@ function builder:node(fname)
     return node
 end
 
+function validate_command(cmd)
+    for _, x in ipairs(cmd) do
+        if type(x) ~= "string" then
+            error("command table cannot contain items of type "..type(x))
+        end
+    end
+    return cmd
+end
+
 -- Declare dependencies and command for a target.
 -- Arguments are passed as a table, which should include
 --   target - the filename of the target
@@ -130,7 +140,7 @@ function builder:target(kwargs)
         insert(dep._succ, node)
         insert(depends, dep)
     end
-    node.command = kwargs[3] or kwargs.command
+    node.command = validate_command(kwargs[3] or kwargs.command)
     node.scanner = kwargs.scanner
     return node
 end
@@ -659,13 +669,13 @@ function builder:dump()
         print("target {\"" .. node_name .. "\", {"
           .. util.concat(
             util.map(
-              function(d) return "\""..d.target.."\"" end,
+              function(d) return "\""..tostring(d.target).."\"" end,
               node.depends), ", ")
           .. "}"
           .. (node.command and (
               ", {" .. util.concat(
                 util.map(
-                  function(c) return "\""..c.."\"" end,
+                  function(c) return "\""..tostring(c).."\"" end,
                   node.command), ", ") .. "}")
             or "")
           .. scannerinfo(node)

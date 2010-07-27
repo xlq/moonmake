@@ -4,7 +4,7 @@ require "subprocess"
 make = require "moonmake.make"
 util = require "moonmake.util"
 --functional = require "moonmake.functional"
-atexit = require "moonmake.atexit"
+--atexit = require "moonmake.atexit"
 --flexilist = require "moonmake.flexilist"
 
 local insert = table.insert
@@ -49,7 +49,6 @@ function c:options(opts, envgroup)
     return envgroup
 end
 
--- configure{conf, [CC=...]}
 -- Configuration
 -- Returns table representing the configured compiler, or nil
 function c:configure(conf)
@@ -234,6 +233,7 @@ end
 -- Compile a C source file
 function c:compile(kwargs)
     local bld, tgt, src = unpack(kwargs)
+    assert(type(bld) == "table" and bld.target, "expected builder object as first argument")
     local info = bld.conf[self.name.."CC"]
     if not src then
         src = tgt
@@ -243,16 +243,18 @@ function c:compile(kwargs)
     local cc = info.compiler or kwargs.CC or "cc"
     local cflags = kwargs.CFLAGS or {}
     local incflags = make_incflags(kwargs.CPPPATH or {})
+    --print(util.repr(cflags), util.repr(incflags))
     return bld:target{tgt, src,
         util.merge({cc}, cflags, incflags, {"-c", "-o", tgt, src}),
         scanner = scanner
     }
 end
 
--- c:link {bld, dest, sources, options...}
+-- c:program {bld, dest, sources, options...}
 -- Link a C program
-function c:link(kwargs)
+function c:program(kwargs)
     local bld, tgt, srcs = unpack(kwargs)
+    assert(type(bld) == "table" and bld.target, "expected builder object as first argument")
     local info = bld.conf[self.name.."CC"]
     assert(tgt, "target file not specified")
     assert(srcs, "sources not specified")
@@ -277,4 +279,15 @@ function c:link(kwargs)
     end
     return bld:target{tgt, objects,
         util.merge({ld}, ldflags, {"-o", tgt}, objects)}
+end
+
+-- c:shared_library {bld, dest, sources, options...}
+-- Link a C shared library
+-- TODO: less hard-coding please!
+-- TODO: deal with suffixes and "lib" prefix conventions
+function c:shared_library(kwargs)
+    -- XXX: should I mutate kwargs?
+    kwargs.CFLAGS = util.append(kwargs.CFLAGS or {}, "-fPIC")
+    kwargs.LDFLAGS = util.append(kwargs.LDFLAGS or {}, "-shared", "-fPIC")
+    return self:program(kwargs)
 end

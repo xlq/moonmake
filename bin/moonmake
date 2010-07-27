@@ -1,13 +1,16 @@
 #!/usr/bin/env lua
---require "lfs"
+
+require "lfs"
+
+-- Add directory relative to this script to package paths
+local cwd = arg[0]:match("^(.*)/[^/]*$")
+package.path = (cwd:sub(1,1)=="/" and cwd or lfs.currentdir().."/"..cwd)
+            .. "/../?.lua;" .. package.path
+
 conf = require "moonmake.conf"
 make = require "moonmake.make"
 util = require "moonmake.util"
 optparse = require "moonmake.optparse"
-
---local cwd = arg[0]:match("^(.*)/[^/]*$")
---package.path = (cwd:sub(1,1)=="/" and cwd or lfs.currentdir().."/"..cwd)
---            .. "/?.lua;" .. package.path
 
 --if not lfs.attributes("Moonfile", "mode") then
 --    io.stderr:write(arg[0], " *** No Moonfile found. Stop.\n")
@@ -67,6 +70,7 @@ if util.isearch(opts, "configure") then
     else
         local conf = conf.newconf()
         env.configure(conf)
+        print("Configuration finished.")
         conf:save("config.log")
     end
 else

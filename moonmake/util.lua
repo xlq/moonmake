@@ -2,6 +2,7 @@
 
 module(..., package.seeall)
 --util = require "moonmake.functional"
+platform = require "moonmake.platform"
 
 -- Return true if k is an integer key
 local function isikey(k)
@@ -386,13 +387,14 @@ end
 -- Return just the file portion of a path
 -- eg. basename("a/b/foo.o") == "foo.o"
 function basename(path)
-    return path:match("[^/]*$")
+    return path:match("[^"..platform.pathsep.."]*$")
 end
 
 -- Return just the directory portion of a path
 -- eg. dirname("a/b/foo.o") == "a/b"
 function dirname(path)
-    return path:match("^(.*)/[^/]*$")
+    local s = platform.pathsep
+    return path:match("^(.*)"..s.."[^"..s.."]*$")
 end
 
 -- Join bits of pathname (like Python's os.path.join)
@@ -400,10 +402,11 @@ end
 -- eg. path("a", "/b") == "/b"
 function path(...)
     local s = ""
+    local sep = platform.pathsep
     for _, v in ipairs({...}) do
-        if v:sub(1,1) == "/" then s = v
+        if v:sub(1,1) == sep then s = v
         else
-            if #s > 0 and s:sub(-1) ~= "/" then s = s .. "/" end
+            if #s > 0 and s:sub(-1) ~= sep then s = s .. sep end
             s = s .. v
         end
     end
@@ -412,7 +415,11 @@ end
 
 -- Return true if path is absolute
 function isabs(path)
-    return startswith(path, "/")
+    if platform.platform == "windows" then
+        return path:sub(2,3) == ":\\"
+    else
+        return startswith(path, platform.pathsep)
+    end
 end
 
 ----- STRING REPRESENTATION --
@@ -458,7 +465,7 @@ function repr(obj)
                 return "{" .. table.concat(bits, ", ") .. "}"
             end
         elseif typ == "string" then
-            return "\"" .. obj:gsub("\"", "\\\"") .. "\""
+            return "\"" .. obj:gsub("[\"\\]", "\\%0") .. "\""
         elseif doiter and typ == "function" then
             return "{" .. concat(obj, ", ") .. "}"
         else

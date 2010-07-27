@@ -3,6 +3,7 @@ require "lfs"
 --tostring2 = require "moonmake.tostring2"
 util = require "moonmake.util"
 optparse = require "moonmake.optparse"
+platform = require "moonmake.platform"
 --functional = require "moonmake.functional"
 --list = require "moonmake.flexilist".list
 
@@ -117,7 +118,8 @@ end
 -- Get and split PATH variable
 function split_path()
     if not g_path_bits then
-        g_path_bits = util.totable((os.getenv("PATH") or ""):gmatch("[^:]+"))
+        g_path_bits = util.totable((os.getenv("PATH") or ""):
+          gmatch("[^"..platform.pathenvsep.."]+"))
     end
     return g_path_bits
 end
@@ -131,7 +133,7 @@ end
 -- finish a test
 function conf:endtest(result, success, diagnostics)
     if success then io.stdout:write(result, "\n")
-    else io.stdout:write("\27[0;31m", result, "\27[0m\n") end
+    else io.stdout:write(result, "\n") end
     if not success and diagnostics then print(diagnostics) end
 end
 
@@ -139,6 +141,12 @@ end
 function conf:abort()
     print("Configuration failed.")
     os.exit(1)
+end
+
+if platform.platform == "windows" then
+    exesuffixes = {"", ".exe"}
+else
+    exesuffixes = {""}
 end
 
 -- conf:findprogram({cmd1, cmd2, ...}, [desc])
@@ -149,14 +157,41 @@ function conf:findprogram(cmds, desc)
     self:test(desc or "Checking for " .. table.concat(cmds, ","))
     local path = split_path()
     for prog in util.iter(cmds) do
-        if util.isabs(prog) then
-            if lfs.attributes(prog, "mode") then
-                self:endtest(prog, true)
-                return prog
+        for _, exesuffix in ipairs(exesuffixes) do
+            local prog2 = prog..exesuffix
+            if util.isabs(prog2) then
+                if lfs.attributes(prog2, "mode") then
+                    self:endtest(prog2, true)
+                    return prog2
+                end
+            else
+                for _, dir in ipairs(path) do
+                    local try_path = util.path(dir, prog2)
+                    if lfs.attributes(try_path, "mode") then
+                        self:endtest(try_path, true)
+                        return try_path
+                    end
+                end
+            end
+        end
+    end
+    self:endtest("not found", false)
+end
+
+-- conf:findfile({file1, file2, ...}, {dir1, dir2, ..}, desc)
+-- Find a file named file1 or file2 or ... in dir1 or dir 2 or ...
+-- Return its filename
+function conf:findfile(files, dirs, desc)
+    self:test(desc or "Checking for " .. table.concat(files, ","))
+    for _, file in ipairs(files) do
+        if util.isabs(file) then
+            if lfs.attributes(file, "mode") then
+                self:endtest(file, true)
+                return file
             end
         else
-            for _, dir in ipairs(path) do
-                local try_path = util.path(dir, prog)
+            for _, dir in ipairs(dirs) do
+                local try_path = util.path(dir, file)
                 if lfs.attributes(try_path, "mode") then
                     self:endtest(try_path, true)
                     return try_path

@@ -20,7 +20,7 @@ function quote(arg)
     assert(type(arg) == "string", "expected string as first argument")
     local needs_quoting = arg:find("[ \t%!%$%^%&%*%(%)%~%[%]%\\%|%{%}%'%\"%;%<%>%?]")
     if needs_quoting then
-        arg = "'" .. arg:gsub("%\\", "\\\\") .. "'"
+        arg = "'" .. arg:gsub("%'", "'\\''") .. "'"
     end
     return arg
 end

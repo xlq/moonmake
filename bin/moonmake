@@ -3,8 +3,9 @@
 require "lfs"
 
 -- Add directory relative to this script to package paths
-local cwd = arg[0]:match("^(.*)/[^/]*$")
-package.path = (cwd:sub(1,1)=="/" and cwd or lfs.currentdir().."/"..cwd)
+local cwd = arg[0]:match("^(.*)[\\/][^\\/]*$")
+package.path = ((cwd:sub(1,1)=="/" or cwd:sub(2,3)==":\\")
+                and cwd or lfs.currentdir().."/"..cwd)
             .. "/../?.lua;" .. package.path
 
 conf = require "moonmake.conf"

@@ -35,6 +35,11 @@ end
 --     end
 -- end
 
+-- Get a variable from kwargs or the configuration
+function c:getvar(name, conf, kwargs, default)
+    return kwargs[name] or conf[self.name..name] or default
+end
+
 function c:options(opts, envgroup)
     if not envgroup then
         envgroup = {
@@ -107,51 +112,65 @@ function c:configure(conf)
     return info
 end
 
+-- Construct compiler flags from list of include paths
 local function make_incflags(cpppath)
     return util.totable(
       util.map(function(x) return "-I"..x end, cpppath))
 end
 
--- Try a compilation
--- inf should contain the following fields:
+-- Construct compiler flags from list of libraries
+local function make_libflags(libs)
+    return util.totable(
+      util.map(function(x) return "-l"..x end, libs))
+end
+
+-- c:try_compile {conf, [options...]}
+-- Try a compilation.
+-- options should contain the following:
 --   CC, CFLAGS, CPPPATH (optional)
 --   desc = description of test
 --   link = true/false (whether to try linking or not)
 --   content = program to compile
 --   okstr = result string on success (default "ok")
 --   failstr = result string on failure (default "no")
--- function try_compile(inf)
---     luaconf.start_test(inf.desc)
---     local content = inf.content or "int main(){ return 0; }"
---     local testfname, testf = luaconf.tmpname(
---         nil, nil, ".c")
---     testf:write(content .. "\n")
---     testf:close()
---     luaconf.log("Wrote `%s':\n%s", testfname, content)
---     local cc = inf.CC or CC or "cc"
---     local cflags = getruleopt(inf, "CFLAGS")
---     local ldflags = getruleopt(inf, "LDFLAGS")
---     local incflags = make_incflags(getruleopt(inf, "CPPPATH"))
---     local exitcode, msgs
---     local cmd
---     if inf.link then
---         cmd = table.join({cc}, cflags, incflags, ldflags, {util.basename(testfname)})
---     else
---         cmd = table.join({cc, "-c"}, cflags, incflags, {util.basename(testfname)})
---     end
---     local cmd = subprocess.form_cmdline(cmd)
---     luaconf.log("Running: %s", cmd)
---     exitcode, msgs = subprocess.execute_cap(
---         cmd, util.dirname(testfname))
---     os.remove(testfname)
---     if exitcode ~= 0 then
---         luaconf.end_test(inf.failstr or "no", false, msgs)
---         return false
---     else
---         luaconf.end_test(inf.okstr or "ok", true, msgs)
---         return true
---     end
--- end
+-- Return value: true if compilation succeeded, false/nil if not.
+
+function c:try_compile(kwargs)
+    assert(type(self) == "table" and self.name, "expected C compiler object as self")
+    local conf = kwargs[1]
+    assert(type(conf) == "table" and conf.test, "expected configure object as first argument")
+    local info = conf[self.name.."CC"]
+    assert(info, self.name.."CC has not been configured")
+    conf:test(kwargs.desc)
+    local content = kwargs.content or "int main(){ return 0; }"
+    local testfname, testf = conf:tmpname(nil, ".c")
+    testf:write(content, "\n")
+    testf:close()
+    --conf:log("Wrote `%s':\n%s", testfname, content)
+    local cc = kwargs.CC or info.compiler or "cc"
+    local cflags = self:getvar("CFLAGS", conf, kwargs, {})
+    local incflags = make_incflags(self:getvar("CPPPATH", conf, kwargs, {}))
+    local ldflags = self:getvar("LDFLAGS", conf, kwargs, {})
+    local libflags = make_libflags(self:getvar("LIBS", conf, kwargs, {}))
+    local cmd
+    if kwargs.link then
+        cmd = util.merge({cc}, cflags, incflags, ldflags, {util.basename(testfname)}, libflags)
+    else
+        cmd = util.merge({cc, "-c"}, cflags, incflags, {util.basename(testfname)})
+    end
+    -- local cmd = subprocess.form_cmdline(cmd) -- ???
+    --conf:log("Running: %s", cmd)
+    util.merge(cmd, {cwd=util.dirname(testfname), stderr=subprocess.STDOUT})
+    local exitcode, msgs = subprocess.call_capture(cmd)
+    os.remove(testfname)
+    if exitcode ~= 0 then
+        conf:endtest(kwargs.failstr or "no", false, msgs)
+        return false
+    else
+        conf:endtest(kwargs.okstr or "ok", true, msgs)
+        return true
+    end
+end
 
 -- C source scanner
 function scanner(bld, node)
@@ -240,9 +259,9 @@ function c:compile(kwargs)
         assert(src, "source file not specified")
         tgt = kwargs.target or util.swapext(src, kwargs.OBJSUFFIX or info.objsuffix or ".o")
     end
-    local cc = info.compiler or kwargs.CC or "cc"
-    local cflags = kwargs.CFLAGS or {}
-    local incflags = make_incflags(kwargs.CPPPATH or {})
+    local cc = kwargs.CC or info.compiler or "cc"
+    local cflags = self:getvar("CFLAGS", bld.conf, kwargs, {})
+    local incflags = make_incflags(self:getvar("CPPPATH", bld.conf, kwargs, {}))
     --print(util.repr(cflags), util.repr(incflags))
     local node = bld:target{tgt, src,
         util.merge({cc}, cflags, incflags, {"-c", "-o", tgt, src}),
@@ -262,7 +281,7 @@ function c:program(kwargs)
     assert(srcs, "sources not specified")
     if type(srcs) == "string" then srcs = {srcs} end
     local ld = kwargs.LD or kwargs.CC or info.compiler or "cc"
-    local ldflags = kwargs.LDFLAGS or {}
+    local ldflags = self:getvar("LDFLAGS", bld.conf, kwargs, {})
     local objsuffix = info.objsuffix or ".o"
     local objects = {}
     for _,src in ipairs(srcs) do
@@ -280,7 +299,8 @@ function c:program(kwargs)
         insert(objects, obj)
     end
     return bld:target{tgt, objects,
-        util.merge({ld}, ldflags, {"-o", tgt}, objects)}
+        util.merge({ld}, ldflags, {"-o", tgt}, objects,
+        make_libflags(self:getvar("LIBS", bld.conf, kwargs, {})))}
 end
 
 -- c:shared_library {bld, dest, sources, options...}
@@ -289,7 +309,12 @@ end
 -- TODO: deal with suffixes and "lib" prefix conventions
 function c:shared_library(kwargs)
     -- XXX: should I mutate kwargs?
-    kwargs.CFLAGS = util.append(kwargs.CFLAGS or {}, "-fPIC")
-    kwargs.LDFLAGS = util.append(kwargs.LDFLAGS or {}, "-shared", "-fPIC")
+    bld = kwargs[1]
+    kwargs.CFLAGS = util.append(
+        util.copy(self:getvar("CFLAGS", bld.conf, kwargs, {})),
+        "-fPIC")
+    kwargs.LDFLAGS = util.append(
+        util.copy(self:getvar("LDFLAGS", bld.conf, kwargs, {})),
+        "-shared", "-fPIC")
     return self:program(kwargs)
 end

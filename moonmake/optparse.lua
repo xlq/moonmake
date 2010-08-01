@@ -83,7 +83,6 @@ local function format_lines(lines)
     return out
 end
 
-
 -- Guess an option's dest variable
 local function guessdest(o)
     -- Find longest flag name
@@ -110,7 +109,7 @@ function parse(opts, args)
             else
                 local dest = o.dest or guessdest(o)
                 for _, flag in ipairs(o) do
-                    local flag, junk, lastchar = flag:match("^((.*)[^=:])([=:]?)$")
+                    local flag, junk, lastchar = flag:match("^((.*)[^=:%?])([=:%?]?)$")
                     flags[flag] = {lastchar, dest}
                 end
             end
@@ -133,7 +132,7 @@ function parse(opts, args)
                 local o = flags[optname]
                 if o then
                     local mode, dest = unpack(o)
-                    if mode ~= "=" then
+                    if mode ~= "=" and mode ~= "?" then
                         return nil, string.format(
                             "Invalid argument to option: %s\n", arg)
                     end
@@ -149,7 +148,7 @@ function parse(opts, args)
                     local o = flags[arg]
                     if o then
                         local mode, dest = unpack(o)
-                        if mode ~= "" then
+                        if mode ~= "" and mode ~= "?" then
                             -- get another arg
                             i = i + 1
                             local optvalue = args[i]
@@ -202,7 +201,7 @@ local function do_help(opts, lines)
         else
             local flagstrbits = {}
             for _, flag in ipairs(o) do
-                local flag, junk, lastchar = flag:match("^((.*)[^=:])([=:]?)$")
+                local flag, junk, lastchar = flag:match("^((.*)[^=:%?])([=:%?]?)$")
                 if lastchar ~= "" then
                     -- XXX: don't re-calc metavar for every flag of o
                     local metavar = o.metavar
@@ -210,7 +209,14 @@ local function do_help(opts, lines)
                         metavar = o.dest or guessdest(o) or "XXX"
                         metavar = metavar:upper()
                     end
-                    insert(flagstrbits, flag..(lastchar == "=" and lastchar or " ")..metavar)
+                    local str = flag
+                    if lastchar == "=" then str = str.."="
+                    elseif lastchar == "?" then str = str.."[="
+                    else str = str .. " " end
+                    str = str..metavar
+                    if lastchar == "?" then str = str.."]" end
+                    insert(flagstrbits, str)
+                    --insert(flagstrbits, flag..(lastchar == "=" and lastchar or " ")..metavar)
                 else
                     insert(flagstrbits, flag)
                 end

@@ -445,7 +445,6 @@ function builder:roots()
                 if node then
                     insert(roots, node)
                 else
-                    print(tgt)
                     util.fprintf(io.stderr,
                         "%s: *** No rule to make target `%s'. Stop.\n",
                         argv0, tgt)
@@ -546,6 +545,7 @@ function builder:make()
 
     local running_jobs = self.running_jobs
     local finished_jobs = self.finished_jobs
+    local exitcode = 0
 
     -- Depth-first search to find leaves and prune nodes we don't need
     depthfirst(roots, function(node, isleaf)
@@ -564,26 +564,29 @@ function builder:make()
         assert(not isempty(finished_jobs), "waitfor() didn't work!")
         -- n <- completed node in S
         -- remove n from S
-        -- XXX TODO TODO XXX CHECK FOR FAILURE
         local n = remove(finished_jobs)
-        -- for each node m with an edge e from n to m do
-        --     remove edge e
-        n._updated = true
-        -- for each node m with an edge e from n to m do
-        for _, m in ipairs(n._succ) do
-            if isneeded(m) then
-                -- if m has no more incoming edges
-                local more_edges = false
-                for _, dep in ipairs(m.depends) do
-                    if not dep._updated then
-                        more_edges = true
-                        break
+        if n._proc and n._proc.exitcode ~= 0 then
+            exitcode = n._proc.exitcode
+        else
+            -- for each node m with an edge e from n to m do
+            --     remove edge e
+            n._updated = true
+            -- for each node m with an edge e from n to m do
+            for _, m in ipairs(n._succ) do
+                if isneeded(m) then
+                    -- if m has no more incoming edges
+                    local more_edges = false
+                    for _, dep in ipairs(m.depends) do
+                        if not dep._updated then
+                            more_edges = true
+                            break
+                        end
                     end
-                end
-                if not more_edges then
-                    -- insert m into S
-                    -- start m
-                    self:examine(m)
+                    if not more_edges then
+                        -- insert m into S
+                        -- start m
+                        self:examine(m)
+                    end
                 end
             end
         end
@@ -591,6 +594,7 @@ function builder:make()
 
     self:savestate()
     --inval_all_mtime()
+    return exitcode
 end
 
     --print(tostring2.tostring2(dtable))

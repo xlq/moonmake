@@ -117,7 +117,7 @@ else
         elseif opts.clean then
             bld:clean()
         else
-            bld:make()
+            os.exit(bld:make())
         end
     end
 end

@@ -73,6 +73,10 @@ function builder.new()
     }, builder)
 end
 
+function is_builder(x)
+    return type(x) == "table" and getmetatable(x) == builder
+end
+
 -- Print debugging message.
 function builder:debug(fmt, ...)
     if self.opts.debug then
@@ -115,23 +119,14 @@ function validate_command(cmd)
     return cmd
 end
 
--- Declare dependencies and command for a target.
--- Arguments are passed as a table, which should include
---   target - the filename of the target
---   depends - a list of dependencies (filenames)
---   command (optional) - command to remake target
--- As a short-hand, {T, D, C, ...} can be used
--- instead of {target=T, depends=D, command=C, ...}.
-function builder:target(kwargs)
-    local target_name = kwargs[1] or kwargs.target
+-- bld:target(target, depends, command, scanner)
+function builder:target(target_name, depends_names, command, scanner)
     assert(target_name, "no target specified")
     local node = self:node(target_name)
-    local command = kwargs[3] or kwargs.command
     if command and node.command then
         util.errorf("command for target `%s' already defined", target_name)
     end
     assert(not command or type(command) == "table", "command must be a table")
-    local depends_names = kwargs[2] or kwargs.depends
     if type(depends_names) == "string" then depends_names = {depends_names} end
     -- convert list of depends names to table references
     local depends = node.depends
@@ -140,8 +135,11 @@ function builder:target(kwargs)
         insert(dep._succ, node)
         insert(depends, dep)
     end
-    node.command = validate_command(kwargs[3] or kwargs.command)
-    node.scanner = kwargs.scanner
+    node.command = validate_command(command)
+    if scanner then
+        assert(type(scanner) == "function", "function expected for argument 4")
+        node.scanner = scanner
+    end
     return node
 end
 

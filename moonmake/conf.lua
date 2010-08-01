@@ -7,43 +7,49 @@ platform = require "moonmake.platform"
 --functional = require "moonmake.functional"
 --list = require "moonmake.flexilist".list
 
+local insert = table.insert
+
 -- Configuration context
 local conf = { __tostring = util.repr }
+
 conf.__index = conf
 
 function conf:__newindex(k, v)
-    self._vars[k] = true
+    insert(self.__order, k)
     rawset(self, k, v)
 end
 
-function newconf()
-    return setmetatable({
-        _vars = {}, -- set of variable names to write to conf state
-    }, conf)
+-- Create a configuration context
+function newconf(parent, t)
+    t = t or {}
+    t.__comments = {}       -- [varname] = comment list
+    t.__order = {}          -- list of variable names (the order they were created)
+    return setmetatable(t, conf)
 end
+
+conf.newconf = newconf
 
 -- Load configuration variables from file
 -- This executes the log file, so you must trust the file.
-function conf:load(filename)
+function load(filename)
     if lfs.attributes(filename, "mode") then
         -- Load configuration as Lua code
         local func = loadfile(filename)
-        --local f = io.open(filename, "r")
-        --local func = load(
-        --    function() return f:read(4096) end,
-        --    "@" .. filename)
-        --f:close()
-        -- Reset configuration variables
-        self._vars = {}
-        setfenv(func, setmetatable({}, {
-            __index = function(_, k)
-                return self[k] or _G[k]
-            end,
-            __newindex = function(_, k, v)
-                self[k] = v
-            end
-        }))
+
+        -- Create configuration context
+        local conf = newconf()
+
+        -- Create environment for the function
+        local env = {
+            conf = conf
+        }
+        setfenv(func, env)
+
+        -- Run!
         func()
+
+        -- Return the configuration context
+        return conf
     else
         util.errorf("configuration state `%s' does not exist", filename)
     end
@@ -51,18 +57,60 @@ end
 
 -- Save a configuration state
 function conf:save(filename)
-    -- Write code to replay log
-    local f = io.open(filename, "w")
-    f:write("local conf = getfenv()\n")
-    for k, _ in pairs(self._vars) do
-        local v = self[k]
-        if k:match("^[%a_][%w_]*$") then
-            f:write(k, " = ", util.repr(v), "\n")
-        else
-            f:write("conf[", util.repr(k), "] = ", util.repr(v), "\n")
+    local f
+
+    local function keyrepr(k)
+        if type(k) == "string" then
+            if k:match "^[%a_][%w_]*$" then
+                return "." .. k
+            else
+                return "[" .. util.repr(k) .. "]"
+            end
         end
     end
+
+    local function doctx(ctx, name)
+        local comments = ctx.__comments
+        for _, k in ipairs(ctx.__order) do
+            local v = ctx[k]
+            local comment = comments[k]
+            if comment then
+                for _, line in ipairs(comment) do
+                    f:write("-- ", line, "\n")
+                end
+            end
+            if type(v) == "table" and getmetatable(v) == conf then
+                -- sub-context
+                f:write(name, keyrepr(k), " = ", name, ":newconf()\n")
+                doctx(v, name .. keyrepr(k))
+            else
+                f:write(name, keyrepr(k), " = ", util.repr(v), "\n")
+            end
+        end
+    end
+
+    -- Write code to reproduce variables
+    f = io.open(filename, "w")
+    --f:write("local conf = getfenv()\n")
+
+    doctx(self, "conf")
+
     f:close()
+end
+
+-- Set a comment for a configuration variable.
+-- This makes the configuration state more readable.
+function conf:comment(k, text)
+    local lines = self.__comments[k] or {}
+    self.__comments[k] = lines
+    util.merge(lines, util.xsplit(text, "\n"))
+end
+
+-- Get flags from the environment (with defaults)
+function conf:getflags(name, default)
+    local env = os.getenv(name)
+    if env then return util.split(env)
+    else return default or {} end
 end
 
 -- Make a directory for configuration tests
@@ -126,7 +174,7 @@ end
 
 -- start a test
 function conf:test(desc)
-    io.stdout:write(desc, ": ")
+    io.stdout:write(desc or "Unknown test", ": ")
     io.stdout:flush()
 end
 

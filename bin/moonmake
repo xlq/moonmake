@@ -106,8 +106,7 @@ else
     if not env.build then
         print("No build function in Moonfile.")
     else
-        local conf = conf.newconf()
-        conf:load("config.log")
+        local conf = conf.load("config.log")
         local bld = make.builder.new()
         bld.opts = opts
         bld.conf = conf

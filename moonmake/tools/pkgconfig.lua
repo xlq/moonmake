@@ -6,15 +6,17 @@ util = require "moonmake.util"
 function configure(conf)
     assert(type(conf) == "table" and conf.test, "expected conf object as first argument")
     conf.PKGCONFIG = conf:findprogram{"pkg-config"}
+    conf:comment("PKGCONFIG", "Location of pkg-config executable")
     return conf.PKGCONFIG
 end
 
--- Check configuration for package 'pkg'
--- Return CFLAGS, LDFLAGS
--- or nil if package not found.
+-- Check configuration for package 'pkg'.
+-- Store a table at conf[pkg] with configuration variables.
+-- Return boolean.
 function getflags(conf, pkg)
     assert(type(conf) == "table" and conf.test, "expected conf object as first argument")
     assert(type(pkg) == "string", "expected package name as second argument")
+    assert(conf.PKGCONFIG, "pkg-config not configured")
     conf:test("Checking for package "..pkg)
     local cflags, ldflags
     local exitcode, output = subprocess.call_capture {
@@ -23,7 +25,7 @@ function getflags(conf, pkg)
         stderr=subprocess.STDOUT }
     if exitcode ~= 0 then
         conf:endtest("not found", false, output)
-        return nil
+        return false
     end
     cflags = util.totable(output:gmatch("[^ \n]+"))
     local exitcode, output = subprocess.call_capture {
@@ -32,9 +34,11 @@ function getflags(conf, pkg)
         stderr=subprocess.STDOUT }
     if exitcode ~= 0 then
         conf:endtest("failed", false, output)
-        return nil
+        return false
     end
     conf:endtest("ok", true)
-    ldflags = util.totable(output:gmatch("[^ \n]+"))
-    return cflags, ldflags
+    libs = util.totable(output:gmatch("[^ \n]+"))
+    conf[pkg] = {CFLAGS=cflags, LIBS=libs}
+    --conf:comment(pkg, "Settings for package "..pkg)
+    return true
 end

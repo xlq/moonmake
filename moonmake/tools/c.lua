@@ -10,16 +10,6 @@ platform = require "moonmake.platform"
 
 local insert = table.insert
 
-local c = {}
-c.__index = c
-
-function new(name)
-    name = (name or ""):gsub("CC$", "")
-    return setmetatable({
-        name = name,
-    }, c)
-end
-
 ---------- C LANGUAGE SUPPORT ----------
 
 -- -- Get options from arguments or 
@@ -36,66 +26,15 @@ end
 --     end
 -- end
 
--- Get a variable from kwargs or the configuration
-function c:getvar(name, conf, kwargs, default)
-    return kwargs[name] or conf[self.name..name] or default
-end
-
--- Add items to optparse option table
-function c:options(opts, envgroup)
-    if not envgroup then
-        envgroup = {
-            group="Some influential environment variables",
-        }
-        insert(opts, envgroup)
-    end
-    local h = envgroup.help or {}
-    envgroup.help = h
-    insert(h, {"  "..self.name.."CC",      "C compiler command"})
-    insert(h, {"  "..self.name.."CPPPATH", "Paths to search for C headers"})
-    insert(h, {"  "..self.name.."CFLAGS",  "C compiler flags"})
-    insert(h, {"  "..self.name.."LDFLAGS", "C linker flags"})
-    insert(h, {"  "..self.name.."LIBS",    "Names of libraries to link to"})
-    return envgroup
-end
-
--- Get configuration info
-function c:getvars(conf)
-    local vars = conf[self.name.."CC"]
-    if not vars then error(self.name.."CC has not been configured") end
-    return vars
-end
-
--- Set configuration info
-function c:setvars(conf, vars)
-    conf[self.name.."CC"] = vars
-end
-
--- split_flags(flags, [strip_prefix])
--- Split flags from an environment variable.
--- Remove prefix strip_prefix, if present, from each option.
--- If flags is a table, it is returned immediately.
-function split_flags(flags, strip_prefix)
-    if type(flags) == "table" then return table end
-    local tab = util.split(flags)
-    for i = 1, #tab do
-        if strip_prefix and util.startswith(tab[i], strip_prefix) then
-            tab[i] = tab[i]:sub(#strip_prefix + 1)
-        end
-    end
-    return tab
-end
-
--- c:configure {conf, [options...]}
--- Configuration
--- Options can include CFLAGS, LDFLAGS. These are used as the defaults.
--- Returns table representing the configured compiler, or nil
-function c:configure(kwargs)
-    local conf = kwargs[1]
+-- configure(conf, [cc])
+-- Configure the C compiler.
+-- cc is the path of the C compiler to use.
+-- Returns true on success, false/nil on failure.
+function configure(conf, cc)
     -- TODO: support more compilers!
-    local cc = os.getenv(self.name.."CC")
     cc = conf:findprogram(cc and {cc} or {"gcc", "cc", "tcc"})
     if not cc then return nil end
+    conf.CC = cc
     
     conf:test("Checking for suffix of object files")
     local testfname, testf = conf:tmpname(nil, ".c")
@@ -127,6 +66,8 @@ function c:configure(kwargs)
         conf:endtest("failed", false, "no object found")
         return nil
     end
+    conf.OBJSUFFIX = suffix
+    --conf:comment("OBJSUFFIX", "Suffix for object file names")
 
     conf:test("Checking for -M")
     local exitcode, msgs = subprocess.call_capture {
@@ -144,35 +85,13 @@ function c:configure(kwargs)
     if platform.platform == "windows" then libsuffix = ".dll"
     else libsuffix = ".so" end
 
-    local vars = {
-        compiler = cc,
-        objsuffix = suffix,
-        libsuffix = libsuffix,
-    }
-    
-    -- Read environment variables
-    vars.CPPPATH = split_flags(os.getenv(self.name.."CPPPATH") or kwargs.CPPPATH, "-I")
-    vars.CFLAGS = split_flags(os.getenv(self.name.."CFLAGS") or kwargs.CFLAGS)
-    vars.LDFLAGS = split_flags(os.getenv(self.name.."LDFLAGS") or kwargs.LDFLAGS)
-    vars.LIBS = split_flags(os.getenv(self.name.."LIBS") or kwargs.LIBS, "-l")
+    conf.LIBSUFFIX = libsuffix
+    --conf:comment("LIBSUFFIX", "Suffix for shared library file names")
 
-    self:setvars(conf, vars)
-    return vars
+    return true
 end
 
--- Construct compiler flags from list of include paths
-local function make_incflags(cpppath)
-    return util.totable(
-      util.map(function(x) return "-I"..x end, cpppath))
-end
-
--- Construct linker flags from list of libraries
-local function make_libflags(libs)
-    return util.totable(
-      util.map(function(x) return "-l"..x end, libs))
-end
-
--- c:try_compile {conf, [options...]}
+-- try_compile {conf, [options...]}
 -- Try a compilation.
 -- options should contain the following:
 --   CC, CFLAGS, CPPPATH (optional)
@@ -183,27 +102,25 @@ end
 --   failstr = result string on failure (default "no")
 -- Return value: true if compilation succeeded, false/nil if not.
 
-function c:try_compile(kwargs)
-    assert(type(self) == "table" and self.name, "expected C compiler object as self")
+function try_compile(kwargs)
+    assert(type(kwargs) == "table", "expected a single table argument")
     local conf = kwargs[1]
     assert(type(conf) == "table" and conf.test, "expected configure object as first argument")
-    local vars = self:getvars(conf)
     conf:test(kwargs.desc)
     local content = kwargs.content or "int main(){ return 0; }"
     local testfname, testf = conf:tmpname(nil, ".c")
     testf:write(content, "\n")
     testf:close()
     --conf:log("Wrote `%s':\n%s", testfname, content)
-    local cc = kwargs.CC or vars.compiler or "cc"
-    local cflags = self:getvar("CFLAGS", conf, kwargs, {})
-    local incflags = make_incflags(self:getvar("CPPPATH", conf, kwargs, {}))
-    local ldflags = self:getvar("LDFLAGS", conf, kwargs, {})
-    local libflags = make_libflags(self:getvar("LIBS", conf, kwargs, {}))
+    local cc = kwargs.CC or conf.CC or "cc"
+    local cflags = kwargs.CFLAGS or conf.CFLAGS or {}
+    local ldflags = kwargs.LDFLAGS or conf.LDFLAGS or {}
+    local libs = kwargs.LIBS or conf.LIBS or {}
     local cmd
     if kwargs.link then
-        cmd = util.merge({cc}, cflags, incflags, ldflags, {util.basename(testfname)}, libflags)
+        cmd = util.merge({cc}, cflags, ldflags, {util.basename(testfname)}, libs)
     else
-        cmd = util.merge({cc, "-c"}, cflags, incflags, {util.basename(testfname)})
+        cmd = util.merge({cc, "-c"}, cflags, {util.basename(testfname)})
     end
     -- local cmd = subprocess.form_cmdline(cmd) -- ???
     --conf:log("Running: %s", cmd)
@@ -295,79 +212,111 @@ function scanner(bld, node)
     return deps
 end
 
--- c:compile {bld, [dest,] source, options...}
--- Compile a C source file
-function c:compile(kwargs)
-    local bld, tgt, src = unpack(kwargs)
-    assert(type(bld) == "table" and bld.target, "expected builder object as first argument")
-    local vars = self:getvars(bld.conf)
-    if not src then
-        src = tgt
-        assert(src, "source file not specified")
-        tgt = kwargs.target or util.swapext(src, kwargs.OBJSUFFIX or vars.objsuffix or ".o")
+-- gather_flags(bld, conf, name, use)
+-- Assemble flags
+-- name is "CFLAGS", "LDFLAGS" etc.
+local function gather_flags(bld, options, name)
+    local conf = options.conf or bld.conf
+    local flags = util.copy(options[name] or conf[name] or {})
+    for _, pkgname in ipairs(options.use or {}) do
+        local pkg = options[pkgname] or conf[pkgname]
+        if pkg then
+            util.merge(flags, pkg[name])
+        end
     end
-    local cc = kwargs.CC or vars.compiler or "cc"
-    local cflags = self:getvar("CFLAGS", bld.conf, kwargs, {})
-    local incflags = make_incflags(self:getvar("CPPPATH", bld.conf, kwargs, {}))
-    --print(util.repr(cflags), util.repr(incflags))
-    local node = bld:target{tgt, src,
-        util.merge({cc}, cflags, incflags, {"-c", "-o", tgt, src}),
-        scanner = scanner,
-    }
-    node.CFLAGS = util.merge({}, cflags, incflags)
+    return flags
+end
+
+-- compile(bld, dest, source, [options])
+-- Compile a C source file.
+-- Options is a table with:
+--     CFLAGS  - usual meanings (overriding)
+--     conf - compiler configuration to use
+--     use - list of packages to use
+function compile(bld, dest, source, options)
+    assert(make.is_builder(bld), "expected builder as first argument")
+    assert(source, "source file not specified")
+    options = options or {}
+    local conf = options.conf or bld.conf
+    if not dest then
+        dest = util.swapext(source, options.OBJSUFFIX or conf.OBJSUFFIX or ".o")
+    end
+    local cflags = gather_flags(bld, options, "CFLAGS")
+    local node = bld:target(
+        dest,
+        source,
+        util.merge(
+            {options.CC or conf.CC or "cc"},
+            cflags,
+            {"-c", "-o", dest, source}
+        ),
+        scanner
+    )
+    node.CFLAGS = cflags
     return node
 end
 
--- c:program {bld, dest, sources, options...}
--- Link a C program
-function c:program(kwargs)
-    local bld, tgt, srcs = unpack(kwargs)
-    assert(type(bld) == "table" and bld.target, "expected builder object as first argument")
-    local vars = self:getvars(bld.conf)
-    assert(tgt, "target file not specified")
-    assert(srcs, "sources not specified")
-    if type(srcs) == "string" then srcs = {srcs} end
-    local ld = kwargs.LD or kwargs.CC or vars.compiler or "cc"
-    local ldflags = self:getvar("LDFLAGS", bld.conf, kwargs, {})
-    local objsuffix = vars.objsuffix or ".o"
+-- program(bld, dest, sources, [options])
+-- Link a C program.
+-- Options is a table with:
+--     CFLAGS, LDFLAGS, LIBS - usual meanings (overriding)
+--     conf - compiler configuration to use
+--     use - list of packages to use
+function program(bld, dest, sources, options)
+    assert(make.is_builder(bld), "expected builder as first argument")
+    assert(dest, "target file not specified")
+    assert(sources, "sources not specified")
+    options = options or {}
+    local conf = options.conf or bld.conf
     local objects = {}
-    for _,src in ipairs(srcs) do
+    if type(sources) == "string" then sources = {sources} end
+    for _, src in ipairs(sources) do
         local base, ext = util.splitext(src)
         local obj
+        -- TODO: more suffixes!
         if util.search({".c", ".i"}, ext) then
-            obj = base .. objsuffix
-            self:compile(
-              util.append(
-                util.hcopy(kwargs),
-                bld, obj, src))
+            -- Compile this source
+            obj = base .. (options.OBJSUFFIX or conf.OBJSUFFIX or ".o")
+            compile(bld, obj, src, options)
         else
+            -- This is already an object
             obj = src
         end
         insert(objects, obj)
     end
-    return bld:target{tgt, objects,
-        util.merge({ld}, ldflags, {"-o", tgt}, objects,
-        make_libflags(self:getvar("LIBS", bld.conf, kwargs, {})))}
+    -- Link the program
+    return bld:target(
+        dest,
+        objects,
+        (util.merge(
+            {options.CC or conf.CC or "cc"},
+            gather_flags(bld, options, "CFLAGS"),
+            gather_flags(bld, options, "LDFLAGS"),
+            {"-o", dest},
+            objects,
+            gather_flags(bld, options, "LIBS")
+        ))
+    )
 end
 
--- c:shared_library {bld, dest, sources, options...}
+-- shared_library(bld, dest, sources, [options])
 -- Link a C shared library
--- TODO: less hard-coding please!
--- TODO: deal with suffixes and "lib" prefix conventions
-function c:shared_library(kwargs)
-    -- XXX: should I mutate kwargs?
-    local bld, dest = unpack(kwargs)
-    local vars = self:getvars(bld.conf)
+-- TODO: deal with "lib" prefix conventions
+function shared_library(bld, dest, sources, options)
+    options = options or {}
+    local conf = options.conf or bld.conf
     if not select(2, util.splitext(dest)) then
         -- Append library suffix
-        dest = dest..vars.libsuffix or ".so"
+        dest = dest .. (options.LIBSUFFIX or conf.LIBSUFFIX or ".so")
     end
-    kwargs[2] = dest
-    kwargs.CFLAGS = util.append(
-        util.copy(self:getvar("CFLAGS", bld.conf, kwargs, {})),
-        "-fPIC")
-    kwargs.LDFLAGS = util.append(
-        util.copy(self:getvar("LDFLAGS", bld.conf, kwargs, {})),
-        "-shared", "-fPIC")
-    return self:program(kwargs)
+    -- TODO: is mutating options a good idea?
+    options.CFLAGS = util.append(
+        util.copy(options.CFLAGS or conf.CFLAGS or {}),
+        "-fPIC"
+    )
+    options.LDFLAGS = util.append(
+        util.copy(options.LDFLAGS or conf.LDFLAGS or {}),
+        "-shared"
+    )
+    return program(bld, dest, sources, options)
 end

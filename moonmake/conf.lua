@@ -134,12 +134,15 @@ end
 function conf:endtest(result, success, diagnostics)
     if success then io.stdout:write(result, "\n")
     else io.stdout:write(result, "\n") end
-    if not success and diagnostics then print(diagnostics) end
+    if not success and self.opts.verbose and diagnostics then print(diagnostics) end
 end
 
 -- abort configuration
 function conf:abort()
     print("Configuration failed.")
+    if not self.opts.verbose then
+        print "Consider using --verbose for more details."
+    end
     os.exit(1)
 end
 

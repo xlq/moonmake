@@ -46,6 +46,10 @@ local opttable = {
     {"-v", "--version",     help="Print version of moonmake and exit."},
     --{"-f:", "--file=",      help="Read FILE as Moonfile"},
 
+    {group="Configuration options",
+    {"--verbose",           help="Print more information while configuring."},
+    },
+
     {group="Build options",
     {"-j:", "--jobs=",      help="Run up to N jobs at once.",
               metavar="N"},
@@ -93,6 +97,7 @@ if util.isearch(opts, "configure") then
         print("No configure function in Moonfile.")
     else
         local conf = conf.newconf()
+        conf.opts = opts
         env.configure(conf)
         print("Configuration finished.")
         conf:save("config.log")

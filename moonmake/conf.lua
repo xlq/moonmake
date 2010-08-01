@@ -172,7 +172,8 @@ function conf:findprogram(cmds, desc)
                     local try_path = util.path(dir, prog2)
                     if lfs.attributes(try_path, "mode") then
                         self:endtest(try_path, true)
-                        return try_path
+                        --return try_path
+                        return prog2
                     end
                 end
             end

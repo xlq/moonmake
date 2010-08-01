@@ -75,6 +75,11 @@ argument string. For example, `"-a:"` would match `"-aYYY"`,
 and "YYY" would become the argument).
 * `"--XXX="` - long option that takes an argument. For example,
 `"--output="` would match `"--output=YYY"` or `"--output YYY"`.
+* `"--XXX?"` - long option that takes an optional argument. For example,
+`"--with-lua?"` would match `"--with-lua"` or `"--with-lua=/usr"`. It would
+match `"--with-lua /usr"` but "/usr" would be interpreted as a positional
+argument, because it would be rather difficult not to.
+If an argument is not given, the field in the returned table is set to `true`.
 
 Option items can also have the following fields:
 

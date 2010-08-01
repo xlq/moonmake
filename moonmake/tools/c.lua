@@ -41,6 +41,7 @@ function c:getvar(name, conf, kwargs, default)
     return kwargs[name] or conf[self.name..name] or default
 end
 
+-- Add items to optparse option table
 function c:options(opts, envgroup)
     if not envgroup then
         envgroup = {
@@ -50,14 +51,47 @@ function c:options(opts, envgroup)
     end
     local h = envgroup.help or {}
     envgroup.help = h
-    insert(h, {"  "..self.name.."CC",     "C compiler command"})
-    insert(h, {"  "..self.name.."CFLAGS", "C compiler flags"})
+    insert(h, {"  "..self.name.."CC",      "C compiler command"})
+    insert(h, {"  "..self.name.."CPPPATH", "Paths to search for C headers"})
+    insert(h, {"  "..self.name.."CFLAGS",  "C compiler flags"})
+    insert(h, {"  "..self.name.."LDFLAGS", "C linker flags"})
+    insert(h, {"  "..self.name.."LIBS",    "Names of libraries to link to"})
     return envgroup
 end
 
+-- Get configuration info
+function c:getvars(conf)
+    local vars = conf[self.name.."CC"]
+    if not vars then error(self.name.."CC has not been configured") end
+    return vars
+end
+
+-- Set configuration info
+function c:setvars(conf, vars)
+    conf[self.name.."CC"] = vars
+end
+
+-- split_flags(flags, [strip_prefix])
+-- Split flags from an environment variable.
+-- Remove prefix strip_prefix, if present, from each option.
+-- If flags is a table, it is returned immediately.
+function split_flags(flags, strip_prefix)
+    if type(flags) == "table" then return table end
+    local tab = util.split(flags)
+    for i = 1, #tab do
+        if strip_prefix and util.startswith(tab[i], strip_prefix) then
+            tab[i] = tab[i]:sub(#strip_prefix + 1)
+        end
+    end
+    return tab
+end
+
+-- c:configure {conf, [options...]}
 -- Configuration
+-- Options can include CFLAGS, LDFLAGS. These are used as the defaults.
 -- Returns table representing the configured compiler, or nil
-function c:configure(conf)
+function c:configure(kwargs)
+    local conf = kwargs[1]
     -- TODO: support more compilers!
     local cc = os.getenv(self.name.."CC")
     cc = conf:findprogram(cc and {cc} or {"gcc", "cc", "tcc"})
@@ -110,13 +144,20 @@ function c:configure(conf)
     if platform.platform == "windows" then libsuffix = ".dll"
     else libsuffix = ".so" end
 
-    local info = {
+    local vars = {
         compiler = cc,
         objsuffix = suffix,
         libsuffix = libsuffix,
     }
-    conf[self.name.."CC"] = info
-    return info
+    
+    -- Read environment variables
+    vars.CPPPATH = split_flags(os.getenv(self.name.."CPPPATH") or kwargs.CPPPATH, "-I")
+    vars.CFLAGS = split_flags(os.getenv(self.name.."CFLAGS") or kwargs.CFLAGS)
+    vars.LDFLAGS = split_flags(os.getenv(self.name.."LDFLAGS") or kwargs.LDFLAGS)
+    vars.LIBS = split_flags(os.getenv(self.name.."LIBS") or kwargs.LIBS, "-l")
+
+    self:setvars(conf, vars)
+    return vars
 end
 
 -- Construct compiler flags from list of include paths
@@ -125,7 +166,7 @@ local function make_incflags(cpppath)
       util.map(function(x) return "-I"..x end, cpppath))
 end
 
--- Construct compiler flags from list of libraries
+-- Construct linker flags from list of libraries
 local function make_libflags(libs)
     return util.totable(
       util.map(function(x) return "-l"..x end, libs))
@@ -146,15 +187,14 @@ function c:try_compile(kwargs)
     assert(type(self) == "table" and self.name, "expected C compiler object as self")
     local conf = kwargs[1]
     assert(type(conf) == "table" and conf.test, "expected configure object as first argument")
-    local info = conf[self.name.."CC"]
-    assert(info, self.name.."CC has not been configured")
+    local vars = self:getvars(conf)
     conf:test(kwargs.desc)
     local content = kwargs.content or "int main(){ return 0; }"
     local testfname, testf = conf:tmpname(nil, ".c")
     testf:write(content, "\n")
     testf:close()
     --conf:log("Wrote `%s':\n%s", testfname, content)
-    local cc = kwargs.CC or info.compiler or "cc"
+    local cc = kwargs.CC or vars.compiler or "cc"
     local cflags = self:getvar("CFLAGS", conf, kwargs, {})
     local incflags = make_incflags(self:getvar("CPPPATH", conf, kwargs, {}))
     local ldflags = self:getvar("LDFLAGS", conf, kwargs, {})
@@ -260,13 +300,13 @@ end
 function c:compile(kwargs)
     local bld, tgt, src = unpack(kwargs)
     assert(type(bld) == "table" and bld.target, "expected builder object as first argument")
-    local info = bld.conf[self.name.."CC"]
+    local vars = self:getvars(bld.conf)
     if not src then
         src = tgt
         assert(src, "source file not specified")
-        tgt = kwargs.target or util.swapext(src, kwargs.OBJSUFFIX or info.objsuffix or ".o")
+        tgt = kwargs.target or util.swapext(src, kwargs.OBJSUFFIX or vars.objsuffix or ".o")
     end
-    local cc = kwargs.CC or info.compiler or "cc"
+    local cc = kwargs.CC or vars.compiler or "cc"
     local cflags = self:getvar("CFLAGS", bld.conf, kwargs, {})
     local incflags = make_incflags(self:getvar("CPPPATH", bld.conf, kwargs, {}))
     --print(util.repr(cflags), util.repr(incflags))
@@ -283,13 +323,13 @@ end
 function c:program(kwargs)
     local bld, tgt, srcs = unpack(kwargs)
     assert(type(bld) == "table" and bld.target, "expected builder object as first argument")
-    local info = bld.conf[self.name.."CC"]
+    local vars = self:getvars(bld.conf)
     assert(tgt, "target file not specified")
     assert(srcs, "sources not specified")
     if type(srcs) == "string" then srcs = {srcs} end
-    local ld = kwargs.LD or kwargs.CC or info.compiler or "cc"
+    local ld = kwargs.LD or kwargs.CC or vars.compiler or "cc"
     local ldflags = self:getvar("LDFLAGS", bld.conf, kwargs, {})
-    local objsuffix = info.objsuffix or ".o"
+    local objsuffix = vars.objsuffix or ".o"
     local objects = {}
     for _,src in ipairs(srcs) do
         local base, ext = util.splitext(src)
@@ -317,10 +357,10 @@ end
 function c:shared_library(kwargs)
     -- XXX: should I mutate kwargs?
     local bld, dest = unpack(kwargs)
-    local info = bld.conf[self.name.."CC"]
+    local vars = self:getvars(bld.conf)
     if not select(2, util.splitext(dest)) then
         -- Append library suffix
-        dest = dest..info.libsuffix or ".so"
+        dest = dest..vars.libsuffix or ".so"
     end
     kwargs[2] = dest
     kwargs.CFLAGS = util.append(

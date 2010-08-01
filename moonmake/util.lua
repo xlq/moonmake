@@ -326,7 +326,8 @@ function xsplit(str, sep, nmax)
                 return r, nmatch
             else
                 -- no more matches
-                local r = str:sub(pos)
+                local r
+                if pos <= #str then r = str:sub(pos) end
                 pos = -1
                 return r, nmatch + 1
             end

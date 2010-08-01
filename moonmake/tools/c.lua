@@ -3,6 +3,7 @@ module(..., package.seeall)
 require "subprocess"
 make = require "moonmake.make"
 util = require "moonmake.util"
+platform = require "moonmake.platform"
 --functional = require "moonmake.functional"
 --atexit = require "moonmake.atexit"
 --flexilist = require "moonmake.flexilist"
@@ -104,9 +105,15 @@ function c:configure(conf)
     end
     conf:endtest("yes", true)
     os.remove(testfname)
+
+    local libsuffix
+    if platform.platform == "windows" then libsuffix = ".dll"
+    else libsuffix = ".so" end
+
     local info = {
         compiler = cc,
         objsuffix = suffix,
+        libsuffix = libsuffix,
     }
     conf[self.name.."CC"] = info
     return info
@@ -309,7 +316,13 @@ end
 -- TODO: deal with suffixes and "lib" prefix conventions
 function c:shared_library(kwargs)
     -- XXX: should I mutate kwargs?
-    bld = kwargs[1]
+    local bld, dest = unpack(kwargs)
+    local info = bld.conf[self.name.."CC"]
+    if not select(2, util.splitext(dest)) then
+        -- Append library suffix
+        dest = dest..info.libsuffix or ".so"
+    end
+    kwargs[2] = dest
     kwargs.CFLAGS = util.append(
         util.copy(self:getvar("CFLAGS", bld.conf, kwargs, {})),
         "-fPIC")

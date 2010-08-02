@@ -6,7 +6,7 @@ require "subprocess"
 --tostring2 = require "moonmake.tostring2"
 util = require "moonmake.util"
 --functional = require "moonmake.functional"
-atexit = require "moonmake.atexit"
+--atexit = require "moonmake.atexit"
 --list = require "moonmake.flexilist".list
 --require "profiler"
 
@@ -161,8 +161,8 @@ end
 
 -- Load or create new state table.
 function builder:loadstate()
-    self.state = lfs.attributes(".luamake.state", "mode")
-      and dofile(".luamake.state")
+    self.state = lfs.attributes(".moonmake.state", "mode")
+      and dofile(".moonmake.state")
       or {
         depends = {},
         commands = {},
@@ -171,7 +171,7 @@ end
 
 -- Write state to file.
 function builder:savestate()
-    local f = io.open(".luamake.state", "w")
+    local f = io.open(".moonmake.state", "w")
     f:write("return " .. util.repr(self.state) .. "\n")
     f:close()
 end

@@ -1,0 +1,663 @@
+moonmake
+========
+
+Introduction
+------------
+
+Moonmake is a configuration and build system written in Lua.
+Configuration and build descriptions are also written in Lua. Moonmake
+does not facilitate outputting makefiles or configure scripts, because
+they would need a shell or a `make' program, which are considerably less
+portable than Lua.
+
+Dependencies
+------------
+
+* Lua 5.1
+* luafilesystem (http://keplerproject.github.com/luafilesystem/)
+* lua-subprocess (http://luaforge.net/projects/subprocess/)
+  If you're willing to manage different syntaxes that shells use to
+  redirect standard output and standard error, it is possible to write
+  a lua-subprocess replacement entirely in Lua, with judicious use of
+  temporary files, that will allow moonmake to execute jobs (not in
+  parallel) on systems where lua-subprocess is not supported.
+
+Modules
+-------
+
+Moonmake is split up into several modules.
+
+* `moonmake.atexit` - run cleanup code before exiting (currently unused)
+* <<util,moonmake.util>> - general-purpose utility functions
+* <<platform,moonmake.platform>> - get information about the platform that moonmake
+  is running on
+* `moonmake.optparse` - general-purpose option parsing (see
+  link:optparse.txt[])
+* <<conf,moonmake.conf>> - configuration engine
+* <<make,moonmake.make>> - build engine
+* <<tools,moonmake.tools>> - various tools
+* the <<moonmake,moonmake executable>> - this loads and runs scripts, called
+  Moonfiles.
+
+[[util]]
+moonmake.util
+-------------
+
+This contains various general-purpose utility functions. The table
+manipulating functions are particularly useful in a configure/build
+system.
+
+Concepts
+~~~~~~~~
+
+* _iterator_
+This is a function that, each time it is called (with no arguments),
+returns the next value in a sequence, until it returns nil, which
+indicates the end of a sequence. They can be used with Lua's generic for
+loop.
+
+* _iterable_
+This is something that can be iterated over with the `iter` function. It
+can either be a table, a string or an iterator.
+
+Iterator functions
+~~~~~~~~~~~~~~~~~~
+
+==== iter (x)
+Returns an iterator for x.
+
+[options="header"]
+|===============================================
+| If x is                         | returns
+
+| table with __iter metamethod    | __iter(x)
+| table without __iter            | ivalues(x)
+| string                          | chars(x)
+| anything else                   | x
+|===============================================
+
+==== table iterators
+There are a number of functions for iterating over table items.
+
+Note that `pairs` and `ipairs` are different from Lua's functions of the
+same name, because they return closures and don't rely on its results
+being fed back as arguments.
+
+Note also that key,value iterators can also be used as iterators over
+the keys, since the second return value can be ignored.
+
+|=============================================
+|               | values    | key,value pairs
+
+| integer keys  | ivalues   | ipairs
+
+| all keys      | values    | pairs
+
+|=============================================
+
+==== chars (s)
+Returns an iterator over a string's individual characters.
+
+==== totable (iterable)
+Turns iterable into a table by accumulating the values it returns. It
+returns a new table with the accumulated values at keys 1, 2, ...
+
+==== concat (iterable, delim)
+Works the same way as table.concat but it can use any iterable, not just
+a table.
+
+==== map (f, iterable)
+Returns an iterator over f(x) for each value in iterable.
+
+==== filter (f, iterable)
+Returns an iterator over the values from iterable, but excluding any
+items for which the predicate f is false.
+
+==== count (iterable)
+Returns the number of items from an iterable. If the iterable is an
+iterator, it will be exhausted and cannot be used again.
+
+==== any (iterable)
+Returns true iff any item evaluates to true.
+
+==== all (iterable)
+Returns true iff all items evaluate to true.
+
+==== range (a, b)  |  range (n)
+Returns an iterator over a series of numbers. The first form iterates
+over [a,b] (inclusive). The second form iterates over [1,n].
+
+==== getter (k)
+Returns a function f(x) -> x[k]. Useful with map.
+
+Table functions
+~~~~~~~~~~~~~~~
+
+==== search (t, value)
+Finds and returns a k for which t[k] == value, or nil if not found.
+
+==== isearch (t, value)
+Finds and returns a positive integer k for which t[k] == value, or nil
+if not found.
+
+==== copy (t)
+Returns a shallow copy of table t, including the metatable reference.
+
+==== icopy (t)
+Returns a new table containing all the items from t that have positive
+integer keys.
+
+==== hcopy (t)
+Returns a new table containing all the items from t that icopy wouldn't
+copy.
+
+==== compare (t1, t2)
+Return true if t1[k] == t2[k] for any k.
+
+==== isempty (t)
+Return true if t has no items.
+
+==== merge (t, ...)
+A very versatile function!
+
+The table t is mutated, based on each of the other arguments in turn.
+Only the first argument, t, is mutated. The other arguments can be:
+
+* table - positional items (with positive integer keys) are appended
+  on to the end of t. The non-positional items are copied with the same
+  keys, so that the values in t are replaced. For example,
+----------
+t = {1, 2, 3, a="foo", b="bar"}
+merge(t, {4, 5, 6, a="bletch", c="hurrdurr"})
+-- t is now equivalent to {1, 2, 3, 4, 5, 6, a="bletch", b="bar", c="hurrdurr"}
+----------
+* function - the value is assumed to be an iterator. Each item the
+  iterator returns is appended to the end of t.
+* anything else - the value is appended to the end of t.
+
+Returns t.
+
+==== append (t, ...)
+The table t is mutated, by appending each of the remaining arguments to
+it.
+
+Returns t.
+
+String and IO-related functions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+==== split (str, [sep], [nmax])
+Splits a string into pieces using the delimiter sep (which is, by
+default, the space character, " "). Returns a table containing all the
+pieces. If nmax is given, at most nmax splits are done.
+
+* split("") returns {}
+* split("a,b", ",") returns {"a", "b"}
+* split("a,,b", ",") returns {"a", "", "b"}
+
+==== xsplit (str, [sep], [nmax])
+Works exactly the same way as the split function, but returns an
+iterator over the pieces instead of a table.
+
+==== startswith (s, prefix)
+Returns true if s starts with prefix.
+
+==== endswith (s, suffix)
+Returns true if s ends with prefix.
+
+==== printf (fmt, ...)  |  fprintf(file, fmt, ...)
+Behaves as in C. Slightly nicer than using `io.write(string.format(` etc.
+
+==== printfln (fmt, ...)
+Same as printf but appends a newline.
+
+==== errorf (fmt, ...)
+Formats a string before calling Lua's `error` function.
+
+Path and filename functions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+==== splitext (filename)
+Splits a filename into base and suffix.
+
+* splitext "hello.txt" returns "hello", ".txt"
+* splitext "hello" returns "hello"
+
+==== swapext (filename, newext)
+Changes the file suffix of a filename. Returns the new filename.
+
+* swapext("hello.txt", ".doc") returns "hello.doc"
+* swapext("hello", ".doc") returns "hello.doc"
+
+==== basename (path)
+Returns just the file portion of a path.
+
+* basename "a/b/foo.o" returns "foo.o"
+
+==== dirname (path)
+Returns just the directory portion of a path.
+
+* dirname "a/b/foo.o" returns "a/b"
+
+==== path (...)
+Joins bits of pathname (like Python's os.path.join).
+
+* path("a", "b/c") returns "a/b/c"
+* path("a", "/b") returns "/b"
+* path("a", "../z") returns "a/../z"
+
+==== isabs (path)
+Returns true if the given path is absolute (not relative).
+
+Miscellaneous
+~~~~~~~~~~~~~
+
+==== repr (obj)
+Returns a string representation of the given object.
+This string representation is valid Lua code where possible.  Functions,
+threads and userdata cannot have a valid Lua representation, so
+`tostring` is called instead for such values.
+
+[[platform]]
+moonmake.platform
+-----------------
+
+This module sets three variables:
+
+* platform - a string containing the name of the platform. This can take
+  one of the following values: "windows", "posix".
+* pathsep - the string that delimits file names in paths.
+* pathenvsep - the delimiter for the PATH environment variable.
+
+[[conf]]
+moonmake.conf
+-------------
+
+This module provides configuration contexts. A configuration context is
+an object used to store the results of software configuration. For
+example, in a C project, CFLAGS and LDFLAGS would be stored in a
+configuration context.
+
+A configuration context is created with the `newconf` function.
+
+Configuration contexts can be saved to a file and loaded again. This is
+done by writing to a file a Lua program that will reconstruct the
+configuration context and all its variables. Thus, Lua's own parser can
+be used to load a configuration context.
+
+Getting and setting variables in a configuration context is done just
+like a normal Lua table. Configuration contexts also have methods,
+documented below.
+
+You can store numbers, strings, tables and configuration contexts in a
+configuration context, but tables must not contain referrential cycles.
+
+Usage pattern
+~~~~~~~~~~~~~
+
+When the moonmake program is used, it creates a new configuration
+context and passes it to the `configure` function in the Moonfile. The
+`configure` function should then perform several tests.
+
+Before a test, <<conf_test,conf:test>> should be called with a
+description of the test. The test should then be carried out, by
+whatever means, and then <<conf_endtest,conf:endtest>> should be called,
+to report the results.
+
+The test and endtest methods are only really for reporting results to
+the user, so whether you call test...endtest for each action or just for
+related groups of actions is entirely up to you. Calls to test and
+endtest, however, must be matched.
+
+Functions
+~~~~~~~~~
+
+[[tmpname]]
+==== tmpname (tmpdir, namebase, suffix)
+An improved os.tmpname.
+
+Creates a temporary file in tmpdir. The name of the temporary file will
+start with namebase and will end with suffix.
+
+Returns name, fileobj where name is the name of the created file, and
+fileobj is the file opened in write mode.
+
+==== newconf ()  |  conf:newconf ()
+Creates and returns a new configuration context.
+
+==== load (filename)
+Loads a configuration context from the given filename.
+
+==== conf:save (filename)
+Saves the configuration context to the given filename.
+
+==== conf:comment (var, text)
+Stores a comment for the variable named `var`. This comment is written
+out by `conf:save` and is to assist humans reading the produced code.
+
+==== conf:getflags (name, default)
+Gets tool options (eg. compiler flags) from an environment variable named
+by `name`. The value of the environment variable is split up into a
+table.
+
+If an environment variable with the given name is not set, `default` is
+returned.
+
+[[conf_dir]]
+==== conf:dir ()
+Returns the name of a "playground" directory for configuration tests.
+This is usually called ".conftest".
+
+==== conf:tmpname (namebase, suffix)
+Behaves as <<tmpname,tmpname>> but creates the temporary file in the
+<<conf_dir,playground directory>>.
+
+[[conf_test]]
+==== conf:test (desc)
+Starts a test. desc is a string that describes the test, for example
+"Checking for libfoo".
+
+[[conf_endtest]]
+==== conf:endtest (result, success, [diagnostics])
+Finishes a test started by `conf:test`.
+result is a short string
+describing the result. This could be "yes", "ok" or "failed", or it
+could be a discovered filename or option.
+success is a boolean that indicates whether the test was successful or
+not.
+diagnostics is an optional string that contains information about what
+happened.
+
+==== conf:abort ()
+Aborts configuration. This function never returns.
+
+==== conf:findprogram (cmds, [desc])
+Finds a program.
+
+cmds is a table of program names to search for in turn, while desc is an
+optional test description to pass to <<conf_endtest,conf:endtest>>
+
+On success, returns the name of the program that was found.
+
+==== conf:findfile (files, dirs, [desc])
+Searches for each file name in `files` in turn, in the list of
+directories `dirs`. If a file is found, its full path is returned.
+
+desc is an optional string describing the test.
+
+Example: conf:findfile ({"foo", "bar"}, {"a/b", "c"}) would try a/b/foo, c/foo,
+a/b/bar and c/bar. No recursion into subdirectories is done (that would be slow!)
+
+[[make]]
+moonmake.make
+-------------
+This module contains the build engine. Most of the functionality is
+provided through builder objects (which will usually be named `bld` in
+this documentation).
+
+A builder object functions similarly to the `make` program. Targets,
+dependencies and commands are specified for each file that might need
+to be built. Once all these have been specified, the build engine works
+out what needs to be done and does it. Unlike make, though, rules are
+specified using Lua, rather than an esoteric macro language.
+
+Operation of builders
+~~~~~~~~~~~~~~~~~~~~~
+
+Builders use file timestamps to see what has changed. There's no reason
+why hashing couldn't be implemented instead, or as an option.
+
+In addition, builders save state information related to which commands
+targets need. This allows files to be rebuilt when the commands to build
+them change. This is quite difficult to do with "make". Users usually
+resort to running "make -B" to rebuild everything. Tee hee!
+
+State information is saved in a file called ".moonmake.state". This file
+name is currently hard-coded.
+
+Functions
+~~~~~~~~~
+
+==== builder.new ()
+Creates and returns a new builder object. The
+<<moonmake,moonmake program>> will create a builder object for you and
+pass it to the `build` function in the Moonfile.
+
+==== is_builder (x)
+Returns true if x is a builder object.
+
+==== bld:target (target, depends, [command, [scanner]] )
+Specifies dependencies, commands and a scanner function for a target
+file.
+
+* `target` is the file name of the target.
+* `depends` is a table of filenames that the target depends on. This
+  doesn't need to include the files that the scanner function will
+  return (such as C header files), except files that are generated by
+  other rules.
+  In other words, any header files/include files/etc. that are generated
+  (and not always present) must be specified in the `depends` table,
+  otherwise the dependency engine wouldn't know what to make first!
+* `command` is the command to run that produces the target file from the
+  sources. It is a table of arguments, including the name of the program
+  as `command[1]`.
+  There's no equivalent of make-like "automatic variables" that are
+  substituted here. I can't see a use case for this, since there is no
+  support for pattern rules.
+
+IMPORTANT: At the moment, only one command can be specified for each
+target. That's because I'm lazy, not because I don't think that feature
+should be available.
+
+* `scanner` is an optional function to do dependency scanning. This
+  function must accept the builder object as its first argument, and
+  the target node as its second. It must scan the source file(s) for
+  implicit ("dynamic") dependencies and return a table of filenames that
+  the target depends on.
+  If the scanner function returns duplicate dependencies, nothing bad
+  will (should!) happen.
+
+`bld:target` should only be called once per target file.
+
+==== bld:depends (target, depends)
+Adds additional dependencies for the target file `target`. `depends` is
+a table of dependency filenames.
+
+This function can be called before or after `bld:target` and can be
+called multiple times: the dependencies are accumulated.
+
+==== bld:alias (name, targets)
+Defines an alias with name `name` that can be used as a target to build.
+For example, when using the <<moonmake,moonmake program>>, defining an
+alias called "all" would allow you to run "moonmake all".
+`targets` is a table of file names that should be considered for
+rebuilding when the alias is specified.
+
+The alias "default" is treated specially. If no targets are requested
+for building, and the "default" alias exists, the targets given for the
+"default" alias will be considered for rebuilding.
+
+Repeated calls to `bld:alias` with the same alias name will accumulate
+the targets.
+
+==== bld:loadstate ()  |  bld:savestate()
+State is loaded from or saved to the file ".moonmake.state".
+
+==== bld:make ()
+Runs the dependency engine and rebuilds files that need to be rebuilt.
+If you are using the <<moonmake,moonmake program>>, you do not need to
+call this method yourself.
+
+NOTE: `bld:make` uses `bld.opts` (the results from the `optparse`
+module) to find out which targets to consider for rebuilding. This isn't
+a very good design.
+
+===== Target selection
+If targets are specified on the command line, these are considered for
+rebuilding. The targets on the command line can be filenames or names of
+aliases.
+
+If no targets are specified on the command line, and an alias "default"
+exists, this is used (as if only "default" were specified on the command
+line).
+
+If no targets are specified on the command line, and there is no
+"default" alias, everything is considered for rebuilding.
+
+==== bld:dump ()
+Prints a dump of the dependency table. Useful for seeing what rules
+were created.
+
+Corresponds to the --dump option of <<moonmake,moonmake>>.
+
+==== bld:clean ()
+Removes specified targets and dependencies. This only removes files that
+can be regenerated, so you'll be glad to hear it won't delete your
+source files. Unless you did something wrong!
+
+Corresponds to the --clean option of <<moonmake,moonmake>>
+
+[[tools]]
+moonmake.tools.pkgconfig
+------------------------
+This module is for using the pkgconfig system to find the compiler and
+linker flags needed to use a package.
+
+Functions
+~~~~~~~~~
+
+==== configure (conf)
+Configures the pkgconfig tool in the given configuration context
+(`conf`). This function finds the `pkg-config` program and stores its
+location in `conf.PKGCONFIG`.
+
+This function must be called for a configuration context before other
+functions in this module are used.
+
+==== getflags (conf, pkg)
+Gets configuration information for the package named `pkg`. `conf` is the
+configuration context. If the package is found, conf[pkg] is set to a
+table containing the package's information (this consists of the
+variables `CFLAGS` and `LIBS`), and this function returns true.
+You can use the table set in conf[pkg] yourself or, if you're using
+`moonmake.tools.c` for example, you can use the C tool's `use` option.
+
+If the package is not found, this function returns false.
+
+`configure (conf)` must have been called successfully for this configure
+context before `getflags` is used.
+
+moonmake.tools.c
+----------------
+
+This module provides support for the C programming language. The
+following variable names are used in several places in the C module:
+
+[[cvars]]
+* `CC` is the name of the C compiler executable.
+* `CFLAGS` is a table containing C compiler options.
+* `LDFLAGS` is a table containing linker options.
+* `LIBS` is a table containing library options. This is separate from
+  `LDFLAGS` because some toolchains, such as gcc, require the library
+  names to be specified at the end of the command-line.
+
+Supported tools
+~~~~~~~~~~~~~~~
+
+This module is in desperate need of support for compilers other than the
+GNU C compiler.
+
+Functions
+~~~~~~~~~
+
+==== configure (conf, cc)
+Performs configuration for a C compiler.
+
+`cc` is the name of the compiler executable to use. If it is not
+specified, common compiler names are searched for.
+
+This function tests to ensure the compiler works, discovers the suffix
+for object file names and checks to see if the -M option works (used for
+dependency scanning).
+
+If a C compiler is not found, is not working or cannot be configured,
+this function returns a false value. If everything goes well, configure
+returns true.
+
+The following variables are set:
+* `conf.CC` to the name of the C compiler executable.
+* `conf.OBJSUFFIX` to the file name suffix of object files.
+* `conf.LIBSUFFIX` to the file name suffix of shared libraries.
+
+==== try_compile {conf, desc=..., [options...]}
+Attempts to compile a small C program for testing purposes. This can be
+used for testing for the presence of headers, libraries, functions,
+command-line options etc.
+
+The following options can be used in the single table argument:
+
+* `desc` is the description string passed to <<conf_test,conf:test>>.
+* `CC`, `CFLAGS`, `LDFLAGS`, `LIBS` override the variables of the same
+  name in the configuration context.
+* `link` is an optional boolean. If true, the test program is compiled
+  and linked. If false or not specified, the test program is only
+  compiled.
+* `content` is the small program to compile and possibly link. If not
+  specified, the following program is used:
+-----
+int main(){ return 0; }
+-----
+* `okstr`, `failstr` are strings to pass to
+  <<conf_endtest,conf:endtest>> to describe success and failure
+  respectively. Their defaults are "ok" and "no".
+
+`try_compile` returns true if compilation (and linking) succeeded, and
+false otherwise.
+
+===== Example
+
+-------------------------------------------------------------------------------
+    if not moonmake.tools.c.try_compile {conf, desc="Checking for puts",
+        link=true, content='#include "stdio.h"\n'
+          .. 'int main(){ puts("Testing"); return 0; }',
+        failstr="not found"}
+    then
+        print("Your C compiler does not provide a `puts' function.")
+        print("It is not a valid C compiler!")
+        conf:abort()
+    end
+-------------------------------------------------------------------------------
+
+==== compile (bld, dest, source, options)
+Creates build rules to compile a C source file.
+
+* `bld` is the builder.
+* `dest` is the name of the object file to produce. This can be `nil`,
+  in which case the object file name is calculated automatically.
+* `source` is the name of the source file to compile.
+* `options` is an optional table with options in:
+    ** `CC`, `CFLAGS` have their <<cvars,usual meanings>>.
+    ** `conf` is a configuration context to use settings from. By
+       default, `bld.conf` is used.
+
+Returns the target node for the object file.
+
+==== program (bld, dest, sources, options)
+Creates rules to Compile and link a C program.
+
+* `bld` is the builder.
+* `dest` is the name of the program to produce.
+* `sources` is a table of source file names or object file names. If
+file names in this table have a source file suffix, rules to compile
+them are also produced.
+Alternatively, `sources` can be a single string s, which is treated
+the same way as {s}.
+* `options` is an optional table with options in:
+    ** `CC`, `CFLAGS`, `LDFLAGS`, `LIBS` have their
+       <<cvars,usual meanings>>.
+    ** `conf` is a configuration context to use settings from. By
+       default, `bld.conf` is used.
+
+==== shared_library (bld, dest, sources, options)
+Works in exactly the same way as `program`, but creates a shared library
+instead of a program.

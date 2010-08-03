@@ -5,10 +5,15 @@ Introduction
 ------------
 
 Moonmake is a configuration and build system written in Lua.
-Configuration and build descriptions are also written in Lua. Moonmake
-does not facilitate outputting makefiles or configure scripts, because
-they would need a shell or a `make' program, which are considerably less
-portable than Lua.
+Moonmake does not facilitate outputting makefiles or configure scripts,
+because they would need a shell or a `make' program, which are
+considerably less portable than Lua. Instead, configuration and builds
+are controlled by Lua code.
+
+The moonmake project aims to provide a simple library and a command line
+program that are useful in many cases, both related and unrelated to
+building software, rather than a complex framework that makes it
+possible to build a "hello world" program with a single line.
 
 Dependencies
 ------------
@@ -31,6 +36,7 @@ Moonmake is split up into several modules.
 * <<util,moonmake.util>> - general-purpose utility functions
 * <<platform,moonmake.platform>> - get information about the platform that moonmake
   is running on
+[[optparse]]
 * `moonmake.optparse` - general-purpose option parsing (see
   link:optparse.txt[])
 * <<conf,moonmake.conf>> - configuration engine
@@ -276,7 +282,10 @@ moonmake.conf
 This module provides configuration contexts. A configuration context is
 an object used to store the results of software configuration. For
 example, in a C project, CFLAGS and LDFLAGS would be stored in a
-configuration context.
+configuration context, as well as information about required libraries.
+
+This module is intended to do the same job as "configure" scripts, such
+as those produced by autoconf.
 
 A configuration context is created with the `newconf` function.
 
@@ -518,6 +527,7 @@ source files. Unless you did something wrong!
 Corresponds to the --clean option of <<moonmake,moonmake>>
 
 [[tools]]
+[[tools_pkgconfig]]
 moonmake.tools.pkgconfig
 ------------------------
 This module is for using the pkgconfig system to find the compiler and
@@ -661,3 +671,228 @@ the same way as {s}.
 ==== shared_library (bld, dest, sources, options)
 Works in exactly the same way as `program`, but creates a shared library
 instead of a program.
+
+Tutorial
+--------
+This section describes how to use the moonmake program and how to write
+moonmake scripts.
+
+A moonmake script is a Lua source file called "Moonmake", which is
+loaded by tho "moonmake" program. It may contain any functions, but
+these function names are called by moonmake.
+
+Moonfile functions
+~~~~~~~~~~~~~~~~~~
+
+==== options (opts)
+If present, this should add command line option information to the table
+`opts`. The `opts` table will be passed to
+<<optparse,the optparse module>>.
+
+==== configure (conf)
+If present, this should use the <<conf,configuration context>> `conf` to
+find paths, settings, libraries etc. that are needed.
+
+==== build (bld)
+If present, this should construct rules for the <<make,builder object>>
+`bld`.
+
+Examples
+~~~~~~~~
+
+Here is an example Moonfile for building a single-source C program. Its
+semantics are very much like that of a simple Makefile for the same job.
+
+.Moonfile for a single-source C program
+------------------------------------------------------------
+function build(bld)
+    bld:target("hello.o", "hello.c",
+      {"gcc", "-Wall", "-c", "-o", "hello.o", "hello.c"})
+    bld:target("hello", "hello.o",
+      {"gcc", "-o", "hello", "hello.o"})
+end
+------------------------------------------------------------
+
+Note that the core of moonmake is not language-specific, so support for the C
+language is loaded by "require"-ing the C tool.
+
+NOTE: In some build systems, such as scons or waf, tools are located in
+a special tools directory and are loaded using a special function. In
+some systems the tool's functions are also injected into your builder
+object's namespace. In moonmake, this is not the case. You load tools
+just like ordinary Lua modules, and use the functions it provides in its
+own namespace.
+
+.Using the C tool
+----------------------------------------------
+c = require "moonmake.tools.c"
+
+function build(bld)
+    c.program(bld, "hello", "hello.c", {
+        CC = "gcc",
+        OBJSUFFIX = ".o",
+        CFLAGS = {"-Wall"}
+    })
+end
+----------------------------------------------
+
+Put this code into a file called "Moonfile" in the same directory as a C
+program, "hello.c". Run "moonmake" and watch your C program get
+dependency-scanned, compiled and linked.
+
+TIP: Now view .moonmake.state in a text editor to see the stored
+commands and the results of dependency scanning.
+
+In order to find a C compiler and its settings automatically, as well as
+ensure the C compiler is suitable for use, you can define a configure
+function.
+
+.Configuring the C tool
+-------------------------------------------------------------
+c = require "moonmake.tools.c"
+
+function configure(conf)
+    if not c.configure(conf) then conf:abort() end
+end
+
+function build(bld)
+    c.program(bld, "hello", "hello.c", {CFLAGS={"-Wall"}})
+end
+-------------------------------------------------------------
+
+NOTE: CC and OBJSUFFIX are now stored in the configuration context, and
+no longer need to be provided to `c.program`. The main configuration
+context (`bld` in `configure`) is provided to the `build` function as
+`bld.conf`.
+
+Run `moonmake configure`, and if it is successful, run `moonmake` to
+build.
+
+Now, what if you want to use a library? You would need to know where the
+library is located, as well as where the headers are. The pkg-config
+tool has been developed to make finding libraries and their headers
+easy.
+
+[TIP]
+================================================================================
+When pkg-config or an equivalent system is not available, it is
+tempting to try to guess the locations of packages, either by testing
+common locations or by searching. While this may carry merit on some
+platforms, others such as Windows have no standard directory structure
+for libraries and headers, making such testing very difficult.
+
+On systems without pkg-config, it is expected that someone compiling a
+project knows what they're doing, and will be able to fill in the
+information that pkg-config would've provided. In moonmake, this is
+achieved by editing the configuration state, currently saved in a file
+called "config.log".
+================================================================================
+
+Moonmake comes packaged with the
+<<tools_pkgconfig,moonmake.tools.pkgconfig>> module for easily using the
+pkg-config tool.
+
+.Using pkg-config
+--------------------------------------------------------------------------------
+c = require "moonmake.tools.c"
+pkgconfig = require "moonmake.tools.pkgconfig"
+
+function configure(conf)
+    if not c.configure(conf) then conf:abort() end
+    if pkgconfig.configure(conf) then
+        if not pkgconfig.getflags(conf, "libpng") then
+            print "libpng not found. Please check your build environment"
+            print "and PKG_CONFIG_PATH, and try again."
+            conf:abort()
+        end
+    else
+        conf.libpng = {
+            CFLAGS = {"-I/usr/include/libpng14"},
+            LIBS = {"-lpng14"},
+        }
+    end
+end
+
+function build(bld)
+    c.program(bld, "hello", "hello.c", {
+        CFLAGS={"-Wall"},
+        use={"libpng"}})
+end
+--------------------------------------------------------------------------------
+
+Multiple configuration contexts
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+If you wish to compile one program for running on the host (such as a
+build tool) and one program for running on the target environment, you can
+use multiple configuration contexts.
+
+The host and target environments are not the same when cross-compiling,
+and it's important to support cross-compiling where possible, for
+situations when a compiler is not available on the target (for example
+slow or embedded computers).
+
+--------------------------------------------------------------------------------
+c = require "moonmake.tools.c"
+
+function configure(conf)
+    if not c.configure(conf, "arm-elf-gcc") then conf:abort() end  <1>
+    conf.host = conf:newconf()                                     <2>
+    if not c.configure(conf.host) then conf:abort() end            <3>
+end
+
+function build(bld)
+    c.program(bld, "tool", "tool.c", {
+        conf = bld.conf.host })
+    c.program(bld, "hello", "hello.c")
+end
+--------------------------------------------------------------------------------
+
+<1> The C tool is configured to use arm-elf-gcc, for cross-compiling.
+You'll definitely want to get that string from the command line or the
+environment.
+<2> A new, blank configuration context is created.
+<3> The C tool is configured in the new configuration context.
+
+NOTE: The order of 1 and 2 doesn't matter.
+
+Generated header files
+^^^^^^^^^^^^^^^^^^^^^^
+To use a C header file (or the equivalent in any other
+language) generated from another build rule, you *must* explicitly
+indicate the dependency.
+
+NOTE: Generating a header from the `configure` function in a Moonfile
+does not require an explicit dependency, because the configure function
+is always completed, in full, before building commences.
+
+--------------------------------------------------------------
+-- [snip]
+function build(bld)
+    c.program(bld, "tool", "tool.c", {conf=bld.conf.host})
+    bld:target("foo.h", "tool", {"./tool", "-o", "foo.h"})
+    c.compile(bld, "hello.o", "hello.c")
+    bld:depends("hello.o", "foo.h")
+    c.program(bld, "hello", "hello.o")
+end
+--------------------------------------------------------------
+
+A nice feature of the declarativeness (I think I just made that word up)
+of moonmake.make is that all five statements in the above build function
+can be rearranged in any order.
+
+Having said that, the object file name "hello.o" should really be
+returned from c.compile, or maybe c.program.
+
+Future work
++++++++++++
+If a header file foo.h is generated from a build rule, and included in
+many translation units, there are three options:
+* Manually specify each dependency on foo.h, just like in the good old
+  Makefile days.
+* Make every source file depend on foo.h. This would make all sources
+  recompile when foo.h is changed.
+I therefore propose a "weak dependency" system whereby you can specify
+an ordering of rules. In this case you would be able to instruct
+moonmake to generate foo.h before compiling C sources, so that the
+dependency scanner could accurately work out which sources need
+recompiling.

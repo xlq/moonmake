@@ -45,7 +45,7 @@ function configure(conf, cc)
         conf.CC_type = "msvc"
         --conf:endtest(output:match "[^%\n]+", true)
         conf:endtest("Microsoft", true)
-    elseif util.find({"gcc", "cc", "tcc"}, cc) then
+    elseif util.search({"gcc", "cc", "tcc"}, cc) then
         -- GCC-like compiler
         conf.CC_type = "gcc"
         conf:endtest("gcc-like", true)

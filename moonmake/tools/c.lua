@@ -105,8 +105,19 @@ function configure(conf, cc)
         end
     end
     os.remove(testfname)
-    -- TODO: check for and use makedepend
-    conf.CC_scan_method = scan_method or "none"
+    if not scan_method then
+        -- Try to find makedepend
+        local makedepend = conf.MAKEDEPEND or conf:findprogram {"makedepend"}
+        if makedepend then
+            scan_method = "makedepend"
+            conf.MAKEDEPEND = makedepend
+        end
+    end
+    if not scan_method then
+        print "Not doing any dependency scanning."
+        scan_method = "none"
+    end
+    conf.CC_scan_method = scan_method
     conf:comment("CC_scan_method", [[
 The method for scanning C sources for dependencies.
 This can be "compiler" to use the -M compiler option,
@@ -168,17 +179,57 @@ function try_compile(kwargs)
     end
 end
 
+-- gather_flags(bld, conf, name, use)
+-- Assemble flags
+-- name is "CFLAGS", "LDFLAGS" etc.
+local function gather_flags(bld, options, name)
+    local conf = options.conf or bld.conf
+    local flags = util.copy(options[name] or conf[name] or {})
+    for _, pkgname in ipairs(options.use or {}) do
+        local pkg = options[pkgname] or conf[pkgname]
+        if pkg then
+            util.merge(flags, pkg[name])
+        end
+    end
+    return flags
+end
+
+-- Collect include flags and return list of include directories
+local function get_incpaths(flags)
+    local dirs = {}
+    for _, x in ipairs(flags) do
+        if util.startswith(x, "-I") or util.startswith(x, "/I") then
+            insert(dirs, x:sub(3))
+        end
+    end
+    return dirs
+end
+
 -- C source scanner
 function scanner(bld, node)
-    local scan_method = node.CC_scan_method
-    if scan_method == "compiler" then
+    local conf, options = node.cc_conf, node.cc_options
+    local scan_method = conf.CC_scan_method
+    if scan_method == "compiler" or scan_method == "makedepend" then
         local csource = node.depends[1]
         local node_target = node.target
         local node_target_base = util.basename(node_target)
-        -- TODO: handle different formats of include path options
-        local cc = node.command[1]
-        local cmdline = util.merge({cc}, node.CFLAGS, {"-M", csource.target,
-          stdout=subprocess.PIPE})
+
+        local cmdline
+        if scan_method == "compiler" then
+            local cc = node.command[1]
+            cmdline = util.merge({cc}, node.CFLAGS, {"-M", csource.target,
+              stdout=subprocess.PIPE})
+        else
+            cmdline = util.merge(
+                {options.MAKEDEPEND or conf.MAKEDEPEND or "makedepend", "-f-",
+                    "-o"..(options.OBJSUFFIX or conf.OBJSUFFIX or ".o")},
+                util.map(function(x) return "-I"..x end,
+                    get_incpaths(node.CFLAGS)),
+                {csource.target,
+                    stdout=subprocess.PIPE}
+            )
+        end
+
         if not bld.opts.quiet then
             print(make.cmdlinestr(cmdline))
         end
@@ -199,22 +250,26 @@ function scanner(bld, node)
                 local line2 = f:read() or ""
                 line = line:sub(0,-2) .. line2
             end
-            -- throw a regular expression at it!
-            local a, b, m_targ = line:find("^([^%:]*):")
-            if not a then
-                error(string.format(
-                    "failed to parse dependency info while scanning `%s'",
-                    csource.target))
-            end
-            if m_targ ~= default_obj
-            and m_targ ~= default_obj_base then
-                error(string.format(
-                    "%s produced dependencies for `%s', how strange",
-                    cc, m_targ))
-            end
-            line = line:sub(b + 1)
-            for dep in line:gmatch("[^ ]+") do
-                deps[#deps+1] = dep
+            -- remove comment, if present
+            local line = line:gsub("%s*%#.*", "")
+            if line ~= "" then
+                -- throw a regular expression at it!
+                local a, b, m_targ = line:find("^([^%:]*):")
+                if not a then
+                    error(string.format(
+                        "failed to parse dependency info while scanning `%s'",
+                        csource.target))
+                end
+                if m_targ ~= default_obj
+                and m_targ ~= default_obj_base then
+                    error(string.format(
+                        "%s produced dependencies for `%s', how strange",
+                        cc, m_targ))
+                end
+                line = line:sub(b + 1)
+                for dep in line:gmatch("[^ ]+") do
+                    deps[#deps+1] = dep
+                end
             end
         end
         f:close()
@@ -225,22 +280,9 @@ function scanner(bld, node)
                 cc, exitcode, csource.target))
         end
         return deps
+    elseif scan_method == "makedepend" then
+        
     end
-end
-
--- gather_flags(bld, conf, name, use)
--- Assemble flags
--- name is "CFLAGS", "LDFLAGS" etc.
-local function gather_flags(bld, options, name)
-    local conf = options.conf or bld.conf
-    local flags = util.copy(options[name] or conf[name] or {})
-    for _, pkgname in ipairs(options.use or {}) do
-        local pkg = options[pkgname] or conf[pkgname]
-        if pkg then
-            util.merge(flags, pkg[name])
-        end
-    end
-    return flags
 end
 
 -- compile(bld, dest, source, [options])
@@ -269,8 +311,9 @@ function compile(bld, dest, source, options)
     -- TODO: either document this or allow bld:target to specify
     -- an arbitrary object to store
     node.CFLAGS = cflags
-    node.CC_scan_method = conf.CC_scan_method
-    if node.CC_scan_method == "none" then
+    node.cc_options = options
+    node.cc_conf = conf
+    if conf.CC_scan_method == "none" then
         bld:always_make(node)
     end
     return node

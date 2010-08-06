@@ -579,8 +579,18 @@ following variable names are used in several places in the C module:
 Supported tools
 ~~~~~~~~~~~~~~~
 
-This module is in desperate need of support for compilers other than the
-GNU C compiler.
+This module supports the GNU C compiler (gcc) and will probably work
+with the Tiny C compiler (tcc). It also works with MSVC.
+
+Support for other compilers is needed!
+
+Using MSVC
+^^^^^^^^^^
+
+The compiler (CL.EXE) should be in your PATH. The best way to do this is
+to source VCVARS32.BAT. For dependency scanning, you must have the
+makedepend program in your PATH, and the `INCLUDE` environment variable
+should be set.
 
 Functions
 ~~~~~~~~~
